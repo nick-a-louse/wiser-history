@@ -1,0 +1,21 @@
+services:
+  collector:
+    build: .
+    image: wiser-collector
+    container_name: wiser-collector
+    restart: unless-stopped
+    user: "1009:1009"
+    env_file: .env
+    environment:
+      DB_PATH: /data/wiser.db
+      PUBLISH_DIR: /data/published
+    ports:
+      - "9109:9109"
+    volumes:
+      - /opt/appdata/wiser:/data
+    logging:
+      driver: json-file
+      # The predecessor wrote an unbounded log. This one cannot.
+      options:
+        max-size: "10m"
+        max-file: "3"
