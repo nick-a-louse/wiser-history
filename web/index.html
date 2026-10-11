@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiser heating history</title>
+
+<link rel="icon" href="favicon.ico" sizes="32x32">
+<link rel="icon" type="image/png" href="favicon-96.png" sizes="96x96">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<meta name="theme-color" content="#3dcd58">
+
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="viz-root">
+
+<header class="bar">
+  <div class="titles">
+    <h1>Heating history</h1>
+    <p id="freshness" class="freshness">Loading…</p>
+  </div>
+  <button id="theme-toggle" class="ghost" type="button" aria-label="Switch theme">Theme</button>
+</header>
+
+<div class="controls" role="group" aria-label="Chart controls">
+  <div class="segmented" id="ranges" role="group" aria-label="Time range">
+    <button type="button" data-hours="24" class="on">24h</button>
+    <button type="button" data-hours="168">7d</button>
+    <button type="button" data-hours="720">30d</button>
+    <button type="button" data-hours="8760">1y</button>
+    <button type="button" data-hours="0">All</button>
+  </div>
+  <div class="switches">
+    <label><input type="checkbox" id="opt-targets"> Target temps</label>
+    <label><input type="checkbox" id="opt-boiler"> Boiler firing</label>
+    <label><input type="checkbox" id="opt-table"> Data table</label>
+  </div>
+</div>
+
+<p id="tier-note" class="tier-note" aria-live="polite"></p>
+
+<main>
+  <section class="panel">
+    <h2>Temperature</h2>
+    <div id="chart-temp" class="chart chart-tall"></div>
+  </section>
+
+  <section class="panel" id="panel-humidity">
+    <h2>Humidity</h2>
+    <p class="sub">Only the Conservatory and Bedroom 2 have a RoomStat — the other rooms have no humidity sensor.</p>
+    <div id="chart-hum" class="chart chart-short"></div>
+  </section>
+
+  <section class="panel" id="panel-table" hidden>
+    <h2>Data table</h2>
+    <p class="sub">Latest reading per room. The chart is the fast way to read this; the table is here so nothing depends on colour alone.</p>
+    <div class="table-wrap">
+      <table id="table"><thead></thead><tbody></tbody></table>
+    </div>
+  </section>
+</main>
+
+<p id="error" class="error" hidden></p>
+
+<script src="vendor/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

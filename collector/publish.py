@@ -28,6 +28,9 @@ def _write_json(path, payload):
     try:
         with os.fdopen(fd, "w") as handle:
             json.dump(payload, handle, separators=(",", ":"), default=str)
+        # mkstemp creates 0600. The web container runs as a different uid and
+        # only ever reads these, so they must be world-readable.
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except Exception:
         if os.path.exists(tmp):

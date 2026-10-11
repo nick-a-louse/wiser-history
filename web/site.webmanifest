@@ -1,0 +1,13 @@
+{
+  "name": "Wiser heating history",
+  "short_name": "Heating",
+  "description": "Room-by-room heating history from the Drayton Wiser hub",
+  "icons": [
+    { "src": "favicon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "favicon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "theme_color": "#3dcd58",
+  "background_color": "#f9f9f7",
+  "display": "standalone",
+  "start_url": "."
+}

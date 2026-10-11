@@ -19,3 +19,21 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  web:
+    build: ./web
+    image: wiser-web
+    container_name: wiser-web
+    restart: unless-stopped
+    ports:
+      - "5059:8080"
+    volumes:
+      # Read-only: the site serves the data, it must never be able to alter it.
+      - /opt/appdata/wiser/published:/usr/share/nginx/html/published:ro
+    depends_on:
+      - collector
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
