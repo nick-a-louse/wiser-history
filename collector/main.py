@@ -144,7 +144,8 @@ def cycle(cfg, store, hub, weather, publisher, count):
 
     if hub_ok:
         try:
-            written = generate(store, cfg.publish_dir, cfg.poll_seconds)
+            written = generate(store, cfg.publish_dir, cfg.poll_seconds,
+                               cfg.poll_seconds * cfg.weather_every)
             if publisher and count % cfg.s3_every == 0:
                 if count % cfg.db_backup_every == 0:
                     store.commit()

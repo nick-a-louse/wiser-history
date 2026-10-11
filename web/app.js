@@ -106,7 +106,13 @@ function load(tier, from) {
         rooms: [].concat.apply([], parts.map(function (p) { return p.rooms; })),
         weather: [].concat.apply([], parts.map(function (p) { return p.weather; })),
         boiler: [].concat.apply([], parts.map(function (p) { return p.boiler; })),
-        key: "ts_utc", step: (state.meta.poll_seconds || 300) * 1000,
+        key: "ts_utc",
+        step: (state.meta.poll_seconds || 300) * 1000,
+        // Weather is polled a third as often as the hub. Using the hub's
+        // interval here marked every weather point as a gap, so the outside
+        // line was broken between every pair of points and rendered as
+        // nothing at all.
+        weatherStep: (state.meta.weather_seconds || 900) * 1000,
       };
     });
   }
@@ -118,12 +124,15 @@ function load(tier, from) {
           rooms: [].concat.apply([], parts.map(function (p) { return p.rooms; })),
           weather: [].concat.apply([], parts.map(function (p) { return p.weather; })),
           boiler: [],
-          key: "bucket", step: 1800000,
+          key: "bucket", step: 1800000, weatherStep: 1800000,
         };
       });
   }
   return getJSON("daily/all.json").then(function (p) {
-    return { rooms: p.rooms, weather: p.weather, boiler: [], key: "day", step: 86400000 };
+    return {
+      rooms: p.rooms, weather: p.weather, boiler: [],
+      key: "day", step: 86400000, weatherStep: 86400000,
+    };
   });
 }
 
@@ -172,7 +181,9 @@ function buildSeries(data, tier) {
 
   return {
     byRoom: byRoom, humByRoom: humByRoom, targetsByRoom: targetsByRoom,
-    outTemp: outTemp, outHum: outHum, step: data.step, boiler: data.boiler,
+    outTemp: outTemp, outHum: outHum, boiler: data.boiler,
+    step: data.step,
+    weatherStep: data.weatherStep || data.step,
   };
 }
 
@@ -256,7 +267,7 @@ function renderTemp(from, to) {
     lineStyle: { width: 2, type: "dashed" },
     itemStyle: { color: css("--text-muted") },
     z: 1,
-    data: withGaps(byTime(s.outTemp), s.step),
+    data: withGaps(byTime(s.outTemp), s.weatherStep),
   });
 
   var marks = [];
@@ -347,7 +358,7 @@ function renderHumidity(from, to) {
     connectNulls: false,
     lineStyle: { width: 2, type: "dashed" },
     itemStyle: { color: css("--text-muted") },
-    data: withGaps(byTime(s.outHum), s.step),
+    data: withGaps(byTime(s.outHum), s.weatherStep),
   });
 
   document.getElementById("panel-humidity").hidden = series.length === 0;

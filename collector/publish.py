@@ -38,7 +38,7 @@ def _write_json(path, payload):
         raise
 
 
-def generate(store, out_dir, poll_seconds):
+def generate(store, out_dir, poll_seconds, weather_seconds=None):
     """Regenerate the published file set. Returns the list of relative paths."""
     written = []
 
@@ -66,6 +66,10 @@ def generate(store, out_dir, poll_seconds):
         "gaps": store.gaps(poll_seconds),
         "last_success_utc": store.last_success(),
         "poll_seconds": poll_seconds,
+        # Weather is polled less often than the hub. The site needs this
+        # separately: using the hub's interval to detect gaps in the weather
+        # series marks every single point as a gap and the line vanishes.
+        "weather_seconds": weather_seconds or poll_seconds,
         "months": months,
         "years": years,
         "tiers": {"raw_days": 7, "half_hourly_days": 90},

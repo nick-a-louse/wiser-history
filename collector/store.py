@@ -264,7 +264,7 @@ class Store:
             "       CASE WHEN CAST(substr(ts_utc,15,2) AS INTEGER) < 30"
             "            THEN '00' ELSE '30' END || ':00Z' AS bucket,"
             "       room_id, AVG(temp_c) AS temp_c, AVG(setpoint_c) AS setpoint_c,"
-            "       AVG(demand_pct) AS demand_pct"
+            "       AVG(demand_pct) AS demand_pct, AVG(humidity_pct) AS humidity_pct"
             "  FROM room_reading WHERE ts_utc LIKE ?"
             " GROUP BY bucket, room_id ORDER BY bucket", (like,)
         )
@@ -285,7 +285,7 @@ class Store:
         rows = self.conn.execute(
             "SELECT substr(ts_utc,1,10) AS day, room_id,"
             "       MIN(temp_c) AS min_c, MAX(temp_c) AS max_c, AVG(temp_c) AS mean_c,"
-            "       AVG(demand_pct) AS demand_pct"
+            "       AVG(demand_pct) AS demand_pct, AVG(humidity_pct) AS humidity_pct"
             "  FROM room_reading GROUP BY day, room_id ORDER BY day"
         )
         weather = self.conn.execute(
