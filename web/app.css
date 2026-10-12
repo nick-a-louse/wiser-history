@@ -50,8 +50,6 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 .rooms-table { table-layout: fixed; min-width: 640px; }
 .rooms-table th:first-child { width: auto; }
 .rooms-table th:not(:first-child) { width: 7rem; }
-.rooms-table th.num, .rooms-table td.num { text-align: right; font-family: inherit; font-weight: 400; }
-.rooms-table th.num { font-weight: 600; }  /* gomez-ui .num is the big-figure style; here it means "number column" */
 .rooms-table th button {
   font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
   display: inline-flex; align-items: center; gap: 4px;

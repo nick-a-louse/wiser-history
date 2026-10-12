@@ -1,7 +1,8 @@
-/* gomez-ui v1.0 — shared look for Nick's self-hosted apps (TECH-P8).
+/* gomez-ui v1.1 — shared look for Nick's self-hosted apps (TECH-P8).
    Copy unchanged into each app's static folder. Per-app changes go in the app's own CSS,
    and the only required one is the accent (see "App accent" below).
-   Fonts: Barlow + Barlow Condensed (SIL OFL), self-hosted in ./fonts/. */
+   Fonts: Barlow + Barlow Condensed (SIL OFL), self-hosted in ./fonts/.
+   v1.1 (2026-10-12): big-figure style renamed .num -> .g-figure; .num now means a right-aligned number column. */
 
 @font-face { font-family: "Barlow"; font-weight: 400; font-display: swap; src: url("fonts/barlow-latin-400-normal.woff2") format("woff2"); }
 @font-face { font-family: "Barlow"; font-weight: 500; font-display: swap; src: url("fonts/barlow-latin-500-normal.woff2") format("woff2"); }
@@ -73,7 +74,10 @@ a:hover { text-decoration-color: currentColor; }
 [hidden] { display: none !important; }
 .quiet { color: var(--muted); font-weight: 400; }
 .small { font-size: 14px; }
-.num { font-family: var(--font-num); font-weight: 700; }
+/* Big figures (a finish time, a room temperature): the condensed display face. */
+.g-figure { font-family: var(--font-num); font-weight: 700; }
+/* Number columns: put class="num" on the th and its tds so values end on the header's edge. */
+.num { text-align: right; }
 
 /* ------------------------------------------------------------ width
    One centred column. Header, main and footer all use .wrap so their edges line up.

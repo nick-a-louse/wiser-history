@@ -23,7 +23,7 @@ COPY fonts/ /usr/share/nginx/html/fonts/
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Stamp the release into the page (footer and ?v= cache-busters).
-RUN v="$VERSION"; case "$v" in sha-*) v="1.1.0 ($(echo "$v" | cut -c1-11))";; v*) v="${v#v}";; esac \
+RUN v="$VERSION"; case "$v" in sha-*) v="1.1.1 ($(echo "$v" | cut -c1-11))";; v*) v="${v#v}";; esac \
  && sed -i -e "s|__VERSION__|$v|g" -e "s|__BUILD__|$VERSION|g" /usr/share/nginx/html/index.html \
  && chmod -R a+rX /usr/share/nginx/html
 

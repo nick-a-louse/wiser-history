@@ -27,6 +27,7 @@ def test_shared_files_and_icons_present():
               "fonts/barlow-latin-400-normal.woff2"]:
         assert os.path.isfile(os.path.join(WEB, f)), f
     assert json.loads(read("manifest.webmanifest"))["theme_color"] == "#b4400f"
+    assert "gomez-ui v1.1" in read("gomez-ui.css") and ".g-figure" in read("gomez-ui.css")
 
 
 def test_dockerfile_copies_every_file_the_page_uses():

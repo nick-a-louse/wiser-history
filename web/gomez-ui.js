@@ -1,4 +1,4 @@
-/* gomez-ui v1.0 — theme control and "Updated" line. Copy unchanged into each app.
+/* gomez-ui v1.1 — theme control and "Updated" line. Copy unchanged into each app.
    Also put the one-line theme boot snippet in <head> (see 3c) so there's no flash. */
 (function () {
   "use strict";
