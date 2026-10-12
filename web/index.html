@@ -1,69 +1,108 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-GB">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wiser heating history</title>
-
-<link rel="icon" href="favicon.ico" sizes="32x32">
-<link rel="icon" type="image/png" href="favicon-96.png" sizes="96x96">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="manifest" href="site.webmanifest">
-<meta name="theme-color" content="#3dcd58">
-
-<link rel="stylesheet" href="styles.css">
+<title>Heating history</title>
+<!-- icons: all generated from icon.svg, the same file as the header logo -->
+<link rel="icon" href="icon.svg?v=__BUILD__" type="image/svg+xml">
+<link rel="icon" href="favicon-32.png?v=__BUILD__" sizes="32x32" type="image/png">
+<link rel="icon" href="favicon.ico?v=__BUILD__" sizes="any">
+<link rel="apple-touch-icon" href="apple-touch-icon.png?v=__BUILD__">
+<link rel="manifest" href="manifest.webmanifest?v=__BUILD__">
+<meta name="theme-color" content="#b4400f">
+<!-- theme boot + styles, before first paint (gomez-ui) -->
+<meta name="color-scheme" content="light dark">
+<script>try{var t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="gomez-ui.css?v=__BUILD__">
+<link rel="stylesheet" href="app.css?v=__BUILD__">
+<script src="gomez-ui.js?v=__BUILD__" defer></script>
+<script src="vendor/echarts.min.js" defer></script>
+<script src="app.js?v=__BUILD__" defer></script>
 </head>
-<body class="viz-root">
-
-<header class="bar">
-  <div class="titles">
-    <h1>Heating history</h1>
-    <p id="freshness" class="freshness">Loading…</p>
+<body>
+<header class="g-header">
+  <div class="wrap g-header-row">
+    <div class="g-brand">
+      <img class="g-app-icon" src="icon.svg?v=__BUILD__" alt="">
+      <div class="g-titles">
+        <h1 class="g-title">Heating history</h1>
+        <!-- Collected every 5 minutes: green for 30 min, red after 2 hours (matches the collector's /healthz). -->
+        <p class="g-updated-pending" id="updated" data-ok-mins="30" data-stale-mins="120">Loading…</p>
+      </div>
+    </div>
+    <div class="g-actions">
+      <button class="btn btn-icon g-theme" type="button" aria-label="Theme">
+        <svg data-icon="auto" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor"/></svg>
+        <svg data-icon="light" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>
+        <svg data-icon="dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z" fill="currentColor"/></svg>
+      </button>
+    </div>
   </div>
-  <button id="theme-toggle" class="ghost" type="button" aria-label="Switch theme">Theme</button>
+  <div class="wrap"><p class="notice bad" id="error" role="alert" hidden></p></div>
 </header>
 
-<div class="controls" role="group" aria-label="Chart controls">
-  <div class="segmented" id="ranges" role="group" aria-label="Time range">
-    <button type="button" data-hours="24" class="on">24h</button>
-    <button type="button" data-hours="168">7d</button>
-    <button type="button" data-hours="720">30d</button>
-    <button type="button" data-hours="8760">1y</button>
-    <button type="button" data-hours="0">All</button>
-  </div>
-  <div class="switches">
-    <label><input type="checkbox" id="opt-targets"> Target temps</label>
-    <label><input type="checkbox" id="opt-boiler"> Boiler firing</label>
-    <label><input type="checkbox" id="opt-table"> Data table</label>
-  </div>
-</div>
-
-<p id="tier-note" class="tier-note" aria-live="polite"></p>
-
-<main>
-  <section class="panel">
-    <h2>Temperature</h2>
-    <div id="chart-temp" class="chart chart-tall"></div>
-  </section>
-
-  <section class="panel" id="panel-humidity">
-    <h2>Humidity</h2>
-    <p class="sub">Only the Conservatory and Bedroom 2 have a RoomStat — the other rooms have no humidity sensor.</p>
-    <div id="chart-hum" class="chart chart-short"></div>
-  </section>
-
-  <section class="panel" id="panel-table" hidden>
-    <h2>Data table</h2>
-    <p class="sub">Latest reading per room. The chart is the fast way to read this; the table is here so nothing depends on colour alone.</p>
-    <div class="table-wrap">
-      <table id="table"><thead></thead><tbody></tbody></table>
+<main class="wrap">
+  <div class="controls" role="group" aria-label="Chart controls">
+    <div class="seg" id="ranges" role="radiogroup" aria-label="Time range">
+      <button type="button" role="radio" data-hours="24" aria-checked="true">24h</button>
+      <button type="button" role="radio" data-hours="168" aria-checked="false">7d</button>
+      <button type="button" role="radio" data-hours="720" aria-checked="false">30d</button>
+      <button type="button" role="radio" data-hours="8760" aria-checked="false">1y</button>
+      <button type="button" role="radio" data-hours="0" aria-checked="false">All</button>
     </div>
-  </section>
+    <div class="switches">
+      <label><input type="checkbox" id="opt-targets"> Target temps</label>
+      <label><input type="checkbox" id="opt-boiler"> Boiler firing</label>
+    </div>
+    <div class="rooms-ctl" role="group" aria-label="Rooms shown">
+      <span>Rooms</span>
+      <button class="btn btn-small" type="button" id="rooms-all">All</button>
+      <button class="btn btn-small" type="button" id="rooms-none">None</button>
+      <select id="rooms-only" aria-label="Show only one room"><option value="">Only…</option></select>
+    </div>
+  </div>
+  <p id="tier-note" class="tier-note" aria-live="polite"></p>
+
+  <div class="panels">
+    <section class="panel">
+      <h2>Temperature</h2>
+      <div id="chart-temp" class="chart chart-tall"></div>
+    </section>
+
+    <section class="panel" id="panel-humidity">
+      <h2>Humidity</h2>
+      <p class="sub" id="hum-note"></p>
+      <div id="chart-hum" class="chart chart-short"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Rooms</h2>
+      <p class="sub" id="table-note">For the period shown in the charts. Click a heading to sort.</p>
+      <div class="table-wrap">
+        <table class="rooms-table" id="table">
+          <thead><tr>
+            <th aria-sort="none"><button type="button" data-sort="name">Room</button></th>
+            <th class="num" aria-sort="none"><button type="button" data-sort="latest">Latest</button></th>
+            <th class="num" aria-sort="none"><button type="button" data-sort="mean">Average</button></th>
+            <th class="num" aria-sort="none"><button type="button" data-sort="min">Lowest</button></th>
+            <th class="num" aria-sort="none"><button type="button" data-sort="max">Highest</button></th>
+            <th class="num" aria-sort="descending"><button type="button" data-sort="swing">Widest day</button></th>
+            <th class="num" aria-sort="none"><button type="button" data-sort="hum">Humidity</button></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="foot-note">Widest day: the biggest difference between a room's warmest and coldest reading within one day. Big swings point at rooms that lose heat quickly or warm up in the sun.</p>
+    </section>
+  </div>
 </main>
 
-<p id="error" class="error" hidden></p>
-
-<script src="vendor/echarts.min.js"></script>
-<script src="app.js"></script>
+<footer class="g-footer">
+  <div class="wrap">
+    <span>Heating history · v__VERSION__</span>
+    <span id="coverage"></span>
+  </div>
+</footer>
 </body>
 </html>

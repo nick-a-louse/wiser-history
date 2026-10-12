@@ -36,6 +36,11 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 log = logging.getLogger("wiser")
 
+# Release number; the image build adds its git commit (APP_VERSION, e.g. "sha-7eec055...").
+RELEASE = "1.1.0"
+_build = os.environ.get("APP_VERSION", "").strip()
+VERSION = RELEASE if not _build or _build.lstrip("v") == RELEASE else "%s (%s)" % (RELEASE, _build[:11])
+
 STATE = {
     "last_success_epoch": 0.0,
     "last_hub_ok": 0,
@@ -64,6 +69,10 @@ class MetricsHandler(BaseHTTPRequestHandler):
             return
 
         body = (
+            "# HELP wiser_build_info Build information.\n"
+            "# TYPE wiser_build_info gauge\n"
+            'wiser_build_info{version="%s"} 1\n' % VERSION
+        ) + (
             # A timestamp, not just an age: `time() - timestamp` keeps climbing
             # correctly across a scrape gap, whereas a stale age value would
             # keep reporting whatever it was when the collector last answered.

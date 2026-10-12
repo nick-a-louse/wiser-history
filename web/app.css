@@ -1,0 +1,72 @@
+/* Heating history: app-specific styles on top of gomez-ui.css (TECH-P8).
+   gomez-ui provides fonts, neutrals, header, buttons, segments, width and footer.
+   This file sets the accent, the chart palette, panels, controls and the room table. */
+
+:root {
+  --accent-l: #b4400f; --accent-d: #f4925c;      /* registered accent: heat orange */
+  /* Eight categorical room hues, validated for colour-vision deficiency in both
+     modes (the original Wiser palette, kept). Rooms 9-10 reuse 1-2 with a dashed line. */
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  --boiler-band: rgba(180, 64, 15, 0.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    --boiler-band: rgba(244, 146, 92, 0.14);
+  }
+}
+:root[data-theme="dark"] {
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  --boiler-band: rgba(244, 146, 92, 0.14);
+}
+
+/* ---------------------------------------------------------------- controls */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; padding-block: 16px 6px; }
+.switches { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; color: var(--muted); }
+.switches label { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; cursor: pointer; }
+input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
+.rooms-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+.rooms-ctl select {
+  font: inherit; font-size: 14px; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm); min-height: 34px; padding: 4px 8px;
+}
+.tier-note { font-size: 13px; color: var(--muted); padding-block: 4px 12px; }
+
+/* ---------------------------------------------------------------- panels and charts */
+.panels { display: grid; gap: 16px; padding-bottom: 8px; }
+.panels > * { min-width: 0; }      /* let the room table scroll inside its panel on phones */
+.panel h2 { font-size: 17px; font-weight: 700; }
+.panel .sub { color: var(--muted); font-size: 14px; margin-top: 2px; }
+.chart { width: 100%; }
+.chart-tall  { height: min(58vh, 520px); min-height: 320px; }
+.chart-short { height: 240px; }
+.error { border-color: var(--bad); color: var(--bad); }
+
+/* ---------------------------------------------------------------- room table (league table) */
+.rooms-table th, .rooms-table td { white-space: nowrap; }
+.rooms-table { table-layout: fixed; min-width: 640px; }
+.rooms-table th:first-child { width: auto; }
+.rooms-table th:not(:first-child) { width: 7rem; }
+.rooms-table th.num, .rooms-table td.num { text-align: right; font-family: inherit; font-weight: 400; }
+.rooms-table th.num { font-weight: 600; }  /* gomez-ui .num is the big-figure style; here it means "number column" */
+.rooms-table th button {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.rooms-table th[aria-sort="ascending"] button::after,
+.rooms-table th[aria-sort="descending"] button::after { content: ""; border: 4px solid transparent; }
+.rooms-table th[aria-sort="ascending"] button::after { border-bottom-color: currentColor; margin-top: -4px; }
+.rooms-table th[aria-sort="descending"] button::after { border-top-color: currentColor; margin-top: 4px; }
+.rooms-table td:first-child { overflow: hidden; text-overflow: ellipsis; }
+.swatch { display: inline-block; width: 14px; height: 0; border-top: 3px solid; margin-right: 8px; vertical-align: 4px; }
+.swatch.dashed { border-top-style: dashed; }
+.foot-note { font-size: 13px; color: var(--muted); margin-top: 8px; }
+
+@media (max-width: 640px) {
+  .chart-tall { height: 62vh; }
+  .controls .seg { width: 100%; }
+  .controls .seg button { flex: 1; padding: 0 6px; }
+}

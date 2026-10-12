@@ -1,16 +1,16 @@
+# Lives in /srv/wiser on gomez, next to .env. Images are built by GitHub Actions.
 services:
   collector:
-    build: .
-    image: wiser-collector
+    image: ghcr.io/nick-a-louse/wiser-history-collector:latest
     container_name: wiser-collector
     restart: unless-stopped
-    user: "1009:1009"
+    user: "${PUID:-1003}:${PGID:-1006}"   # PUID/PGID live in .env, like the linuxserver containers
     env_file: .env
     environment:
       DB_PATH: /data/wiser.db
       PUBLISH_DIR: /data/published
     ports:
-      - "9109:9109"
+      - "9109:9109"                       # metrics + /healthz; registered in Obsidian: App standard → Port register
     volumes:
       - /opt/appdata/wiser:/data
     logging:
@@ -21,15 +21,19 @@ services:
         max-file: "3"
 
   web:
-    build: ./web
-    image: wiser-web
+    image: ghcr.io/nick-a-louse/wiser-history-web:latest
     container_name: wiser-web
     restart: unless-stopped
+    user: "${PUID:-1003}:${PGID:-1006}"
     ports:
-      - "5059:8080"
+      - "5059:8080"                       # registered in Obsidian: App standard → Port register
     volumes:
       # Read-only: the site serves the data, it must never be able to alter it.
       - /opt/appdata/wiser/published:/usr/share/nginx/html/published:ro
+    # nginx needs somewhere writable for its cache and pid file when it runs as 1003.
+    tmpfs:
+      - /var/cache/nginx
+      - /tmp
     depends_on:
       - collector
     logging:

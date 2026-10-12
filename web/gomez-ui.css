@@ -1,0 +1,155 @@
+/* gomez-ui v1.0 — shared look for Nick's self-hosted apps (TECH-P8).
+   Copy unchanged into each app's static folder. Per-app changes go in the app's own CSS,
+   and the only required one is the accent (see "App accent" below).
+   Fonts: Barlow + Barlow Condensed (SIL OFL), self-hosted in ./fonts/. */
+
+@font-face { font-family: "Barlow"; font-weight: 400; font-display: swap; src: url("fonts/barlow-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow"; font-weight: 500; font-display: swap; src: url("fonts/barlow-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow"; font-weight: 600; font-display: swap; src: url("fonts/barlow-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow"; font-weight: 700; font-display: swap; src: url("fonts/barlow-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 600; font-display: swap; src: url("fonts/barlow-condensed-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 700; font-display: swap; src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2"); }
+
+/* ------------------------------------------------------------ tokens: light */
+:root {
+  color-scheme: light;
+  /* shared neutrals (same in every app) */
+  --bg: #f5f5f2;
+  --surface: #fcfcfa;
+  --ink: #18191a;
+  --muted: #595a55;
+  --faint: #6e6f68;
+  --line: #dedcd5;
+  --line-strong: #bebdb4;
+  /* status: freshness dot, notices, errors */
+  --good: #1a7f37;
+  --warn: #8a5a00;
+  --bad: #b42318;
+  /* App accent: each app overrides these two pairs in its own CSS.
+     Default is a neutral slate for new apps that haven't picked one yet. */
+  --accent-l: #3d5a80;  --accent-d: #8fb0d8;
+  --accent: var(--accent-l);
+  --on-accent: #ffffff;
+  --focus: var(--accent);
+  /* type, shape, layout */
+  --font: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-num: "Barlow Condensed", "Barlow", system-ui, sans-serif;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --page-max: 1200px;
+  --gutter: 16px;
+}
+
+/* ------------------------------------------------------------ tokens: dark */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111212; --surface: #1a1b1b; --ink: #ececea; --muted: #a8a9a3; --faint: #87887f;
+    --line: #2b2c2b; --line-strong: #3f403d;
+    --good: #4bb168; --warn: #d9a441; --bad: #ff8a80;
+    --accent: var(--accent-d); --on-accent: #111212;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111212; --surface: #1a1b1b; --ink: #ececea; --muted: #a8a9a3; --faint: #87887f;
+  --line: #2b2c2b; --line-strong: #3f403d;
+  --good: #4bb168; --warn: #d9a441; --bad: #ff8a80;
+  --accent: var(--accent-d); --on-accent: #111212;
+}
+
+/* ------------------------------------------------------------ base */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--font); font-size: 16px; line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+h1, h2, h3, h4, p { margin: 0; }
+a { color: inherit; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+a:hover { text-decoration-color: currentColor; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+[hidden] { display: none !important; }
+.quiet { color: var(--muted); font-weight: 400; }
+.small { font-size: 14px; }
+.num { font-family: var(--font-num); font-weight: 700; }
+
+/* ------------------------------------------------------------ width
+   One centred column. Header, main and footer all use .wrap so their edges line up.
+   Data-heavy pages add class="g-wide" to <body> to go full width (header follows). */
+.wrap { max-width: var(--page-max); margin: 0 auto; padding-inline: var(--gutter); }
+body.g-wide { --page-max: none; --gutter: clamp(16px, 2.5vw, 32px); }
+
+/* ------------------------------------------------------------ header */
+.g-header { border-bottom: 1px solid var(--line); background: var(--bg); }
+.g-header-row { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; padding-block: 14px; }
+.g-brand { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
+.g-app-icon { width: 36px; height: 36px; flex: none; border-radius: 9px; }
+.g-titles { min-width: 0; }
+.g-title { font-size: 24px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.15; }
+.g-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* "Updated" line: always directly under the title, with a freshness dot */
+.g-updated { display: flex; align-items: center; gap: 7px; margin-top: 3px; font-size: 14px; color: var(--muted); }
+.g-updated::before { content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
+.g-updated[data-state="ok"]::before    { background: var(--good); }
+.g-updated[data-state="late"]::before  { background: var(--warn); }
+.g-updated[data-state="stale"]::before,
+.g-updated[data-state="error"]::before { background: var(--bad); }
+.g-updated[data-state="error"] { color: var(--bad); }
+
+/* ------------------------------------------------------------ buttons */
+.btn {
+  font: inherit; font-size: 15px; font-weight: 600; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  min-height: 40px; padding: 8px 14px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.btn:hover { border-color: var(--ink); }
+.btn[disabled] { opacity: .6; cursor: progress; }
+.btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.btn-primary:hover { border-color: var(--accent); filter: brightness(1.08); }
+.btn-icon { width: 40px; padding: 0; }
+.btn-small { font-size: 14px; min-height: 34px; padding: 6px 10px; }
+
+/* theme button: shows the icon for the current mode */
+.g-theme svg { width: 20px; height: 20px; }
+.g-theme [data-icon] { display: none; }
+:root:not([data-theme]) .g-theme [data-icon="auto"],
+:root[data-theme="light"] .g-theme [data-icon="light"],
+:root[data-theme="dark"]  .g-theme [data-icon="dark"] { display: block; }
+
+/* segmented control (radio group) */
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface); }
+.seg button { font: inherit; font-size: 14px; font-weight: 600; border: 0; background: transparent; color: var(--muted); padding: 7px 12px; min-height: 36px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line-strong); }
+.seg button[aria-checked="true"], .seg button.on { background: var(--accent); color: var(--on-accent); }
+
+/* ------------------------------------------------------------ content blocks */
+main.wrap { padding-block: 8px 40px; }
+main > section { padding-block: 24px; border-top: 1px solid var(--line); }
+main > section:first-child { border-top: 0; }
+.section-title { font-size: 20px; font-weight: 700; margin-bottom: 14px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.notice { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid var(--line); font-size: 14px; }
+.notice.bad { border-color: var(--bad); color: var(--bad); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th { text-align: left; font-size: 13px; font-weight: 600; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid var(--line-strong); }
+td { padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.table-wrap { overflow-x: auto; }
+
+/* ------------------------------------------------------------ footer */
+.g-footer { border-top: 1px solid var(--line); }
+.g-footer .wrap { padding-block: 16px 32px; display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; font-size: 13px; color: var(--muted); }
+
+/* ------------------------------------------------------------ phones */
+@media (max-width: 640px) {
+  .g-title { font-size: 21px; }
+  .g-app-icon { width: 32px; height: 32px; }
+  .g-actions { width: 100%; }
+  .g-actions .btn-primary { flex: 1; }
+}
+@media print {
+  .g-actions { display: none !important; }
+}
