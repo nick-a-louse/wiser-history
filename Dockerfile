@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY collector/ ./collector/
 
-# Non-root. On gomez compose runs it as PUID 1003 / PGID 1006 (gomez app standard);
+# Non-root. On my server, compose runs it as PUID 1003 / PGID 1006 (my app standard);
 # this default keeps the image non-root when run without compose.
 USER 1003:1006
 

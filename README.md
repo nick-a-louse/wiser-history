@@ -32,9 +32,8 @@ Colour uses eight categorical hues validated for colour-vision deficiency in bot
 modes. With ten rooms, the last two reuse the first two hues with a dashed stroke.
 Hue is bound to room id, so a room keeps its colour whichever others are hidden.
 
-It follows the gomez app standard (shared look, GitHub Actions → ghcr.io → Docker on
-gomez). The standard is in Obsidian: *Atlas/Technology/Server/App standard*. The full
-design rationale is in *Atlas/Technology/Server/Wiser Requirements*.
+It follows my shared app standard (shared look, GitHub Actions → ghcr.io → Docker; see
+[How this was built](#how-this-was-built)).
 
 ## Why
 
@@ -55,10 +54,10 @@ here are direct responses to that:
 The room-id decision has since proved itself: two rooms were renamed in August
 2026 and both kept a single unbroken series across the change.
 
-## Set up on gomez
+## Set up (Docker)
 
-You need Docker and a login to GitHub's container registry (already done on gomez:
-`docker login ghcr.io` as root with a `read:packages` token).
+You need Docker and a login to GitHub's container registry while the image is
+private (`docker login ghcr.io` with a `read:packages` token).
 
 1. **Create folders and config.**
    ```bash
@@ -106,8 +105,8 @@ without Cloudflare Access in front.
 
 Every setting is in [.env.example](.env.example), with its default and a one-line
 explanation: the Wiser hub address and secret, the OpenWeatherMap key, AWS credentials
-and bucket, the poll cadences, and `PUID`/`PGID` (default 1003/1006, the same as the
-rest of gomez; `/opt/appdata/wiser` must belong to them).
+and bucket, the poll cadences, and `PUID`/`PGID` (default 1003/1006, the same as my
+other containers; `/opt/appdata/wiser` must belong to them).
 
 ### Data tiers
 
@@ -179,12 +178,26 @@ Dockerfile             the collector image
 web/index.html         the page
 web/app.js             charts, zoom-driven tier switching, linked charts, room table
 web/app.css            accent, chart palette (light + dark), panels and table
-web/gomez-ui.css/.js   the shared look (copied unchanged from the gomez app standard)
+web/gomez-ui.css/.js   the shared look (copied unchanged from my shared app standard)
 web/icon.svg + icons   logo and favicon set
 web/nginx.conf         static serving, cache policy, MIME types
 web/Dockerfile         vendors ECharts at build time (no CDN at runtime), stamps the version
 
-docker-compose.yml     what runs on gomez (/srv/wiser)
+docker-compose.yml     what runs on the server (/srv/wiser)
 scripts/               demo_data.py, make_icons.py
 tests/                 pytest
 ```
+
+## How this was built
+
+This is one of several self-hosted apps I run at home. The code was written by Claude (an AI coding agent) under my direction. My part was the requirements, the standards, the review and the decisions:
+
+- **Requirements first.** Functional and non-functional requirements were agreed as tickets in Obsidian before any code was written.
+- **One shared standard.** All my apps share one look, one repo layout and one build-and-deploy pipeline (GitHub Actions → GitHub Container Registry → Docker Compose). `gomez-ui.css` and `gomez-ui.js` are the shared UI kit from that standard; gomez is my home server's name.
+- **Reviewed before merging.** Every change came in as a pull request, with screenshots at desktop and phone widths in light and dark mode, and was merged only after I'd reviewed it and the tests passed.
+
+More on how I work this way: [my GitHub profile](https://github.com/nick-a-louse).
+
+## Licence
+
+[MIT](LICENSE). Fonts are Barlow and Barlow Condensed under the SIL Open Font License (see the `OFL.txt` next to them).

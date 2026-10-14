@@ -1,6 +1,6 @@
 # Unprivileged nginx: runs as a non-root user and listens on 8080.
-# On gomez, compose runs it as PUID 1003 / PGID 1006 with tmpfs for nginx's
-# cache and pid, per the gomez app standard.
+# On my server, compose runs it as PUID 1003 / PGID 1006 with tmpfs for nginx's
+# cache and pid, per my shared app standard.
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 ARG VERSION=dev

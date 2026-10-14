@@ -1,4 +1,4 @@
-"""The website follows the gomez app standard."""
+"""The website follows my shared app standard."""
 import json
 import os
 
