@@ -1,5 +1,10 @@
 # Wiser heating history
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/desktop-dark.png">
+  <img alt="A day of room temperatures for ten rooms plus the outside temperature, with range buttons and room filters above the chart" src="docs/screenshots/desktop-light.png">
+</picture>
+
 Records Drayton Wiser heating data plus local weather every 5 minutes, and serves
 an interactive site for exploring years of it.
 
@@ -34,6 +39,15 @@ Hue is bound to room id, so a room keeps its colour whichever others are hidden.
 
 It follows my shared app standard (shared look, GitHub Actions → ghcr.io → Docker; see
 [How this was built](#how-this-was-built)).
+
+## On a phone
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/phone-dark.png">
+  <img alt="The temperature chart on a phone" src="docs/screenshots/phone-light.png" width="300">
+</picture>
+
+The screenshots show made-up data from `scripts/demo_data.py`. They follow your GitHub theme, light or dark, like the app itself.
 
 ## Why
 
@@ -167,6 +181,7 @@ Pushing to `main` runs the tests and publishes two images to ghcr.io:
 ## Files
 
 ```
+docs/screenshots/      the pictures in this README (light and dark, desktop and phone)
 collector/config.py    environment parsing, validated at startup
 collector/hub.py       Wiser hub client + response parsing
 collector/weather.py   OpenWeatherMap One Call 4.0 client (scrubs the API key)
