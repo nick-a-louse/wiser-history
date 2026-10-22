@@ -132,6 +132,22 @@ CREATE TABLE IF NOT EXISTS weather_hourly (
 -- Every cycle writes a row here, successful or not. This is what makes a
 -- silent death visible: the original failed for years because nothing recorded
 -- that it had stopped producing data.
+-- Half-hourly energy from the smart meter, via Hildebrand Glow's Bright
+-- service (which reads it from the DCC, whoever the supplier is).
+-- ts_utc is the START of the half-hour. classifier is Glowmarkt's resource
+-- type, e.g. 'gas.consumption' or 'electricity.consumption'. units is what the
+-- API reported (kWh for both on 2026-10-22). Missing half-hours are not
+-- stored; a stored 0 is a genuine zero. The boiler is a combi, so gas includes
+-- hot water (and the hob, if gas).
+CREATE TABLE IF NOT EXISTS energy_halfhourly (
+    ts_utc       TEXT NOT NULL,
+    classifier   TEXT NOT NULL,
+    value        REAL NOT NULL,
+    units        TEXT,
+    fetched_utc  TEXT NOT NULL,
+    PRIMARY KEY (ts_utc, classifier)
+);
+
 CREATE TABLE IF NOT EXISTS run_log (
     ts_utc      TEXT PRIMARY KEY,
     hub_ok      INTEGER NOT NULL,
@@ -139,7 +155,8 @@ CREATE TABLE IF NOT EXISTS run_log (
     publish_ok  INTEGER,
     duration_ms INTEGER,
     error       TEXT,
-    openmeteo_ok INTEGER
+    openmeteo_ok INTEGER,
+    glow_ok      INTEGER
 );
 """
 
@@ -152,6 +169,7 @@ MIGRATIONS = [
     ("weather", "snow_1h_mm", "REAL"),
     ("weather", "condition_id", "INTEGER"),
     ("run_log", "openmeteo_ok", "INTEGER"),
+    ("run_log", "glow_ok", "INTEGER"),
 ]
 
 # Values a weather_hourly row must have at least one of to be worth storing.
@@ -276,6 +294,28 @@ class Store:
             written += 1
         return written
 
+    def record_energy(self, classifier, rows, units, fetched_ts):
+        """Upsert half-hourly energy readings: rows are (ts_utc, value).
+        Returns how many were written. None values (no data) are skipped."""
+        written = 0
+        for ts, value in rows:
+            if value is None:
+                continue
+            _insert(self.conn, "energy_halfhourly", {
+                "ts_utc": ts, "classifier": classifier, "value": value,
+                "units": units, "fetched_utc": fetched_ts,
+            })
+            written += 1
+        return written
+
+    def energy_range(self, classifier):
+        """(first, last) ts_utc stored for a classifier, or (None, None)."""
+        row = self.conn.execute(
+            "SELECT MIN(ts_utc), MAX(ts_utc) FROM energy_halfhourly WHERE classifier=?",
+            (classifier,),
+        ).fetchone()
+        return row[0], row[1]
+
     def first_archive_gap_day(self, start_day, end_day):
         """The earliest day in [start_day, end_day] (YYYY-MM-DD) without a
         complete set of 24 archive hours, or None if every day is complete.
@@ -307,7 +347,7 @@ class Store:
                 for r in rows}
 
     def record_run(self, ts, hub_ok, weather_ok, publish_ok, duration_ms, error=None,
-                   openmeteo_ok=None):
+                   openmeteo_ok=None, glow_ok=None):
         _insert(self.conn, "run_log", {
             "ts_utc": ts,
             "hub_ok": int(hub_ok),
@@ -316,6 +356,7 @@ class Store:
             "duration_ms": duration_ms,
             "error": error,
             "openmeteo_ok": None if openmeteo_ok is None else int(openmeteo_ok),
+            "glow_ok": None if glow_ok is None else int(glow_ok),
         })
 
     def commit(self):

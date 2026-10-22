@@ -5,6 +5,7 @@ that logs or stores a raw response writes the credential to disk. Responses are
 scrubbed here, at the boundary, so nothing downstream can leak it by accident.
 """
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -42,9 +43,12 @@ class Weather:
                 _CURRENT_URL + "?" + query, timeout=self._timeout
             ) as resp:
                 body = scrub(json.load(resp))
+        except urllib.error.HTTPError as exc:
+            # The status code is safe to log and says what went wrong (401 =
+            # key not active or no One Call subscription, 429 = over the cap).
+            # Never log exc.url or the body: both can carry the key.
+            raise WeatherError("weather request failed: HTTP %s" % exc.code) from None
         except Exception as exc:
-            # str(exc) on an HTTPError is just status text, never the URL -
-            # but be explicit rather than trusting that.
             raise WeatherError("weather request failed: %s" % type(exc).__name__) from None
 
         data = body.get("data") or []

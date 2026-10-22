@@ -15,7 +15,7 @@ so either can be rewritten without touching the other:
 
 | | What it does |
 |---|---|
-| **`collector/`** | Polls the Wiser hub and OpenWeatherMap, back-fills hourly weather from Open-Meteo, stores everything in SQLite, generates the static data files, mirrors them to a private S3 bucket |
+| **`collector/`** | Polls the Wiser hub and OpenWeatherMap, back-fills hourly weather from Open-Meteo and half-hourly gas and electricity from the smart meter, stores everything in SQLite, generates the static data files, mirrors them to a private S3 bucket |
 | **`web/`** | nginx serving a single-page ECharts site that reads those files |
 
 The website:
@@ -148,6 +148,23 @@ time; radiation is the mean, and rain and snow the total, over the **preceding**
 A failed sync never affects the hub poll. It's retried an hour later and shows up as
 `wiser_openmeteo_up 0`.
 
+### Energy data (smart meter)
+
+Optional: set `GLOW_USERNAME` and `GLOW_PASSWORD` to your login for Hildebrand Glow's free
+**Bright** app. Bright reads any smart meter on the national smart-meter network (DCC), so this
+works whoever the supplier is. The collector stores half-hourly `gas.consumption` and
+`electricity.consumption` (kWh) in `energy_halfhourly`:
+
+- `ts_utc` is the **start** of the half-hour. Missing half-hours aren't stored; a stored 0 is a real zero.
+- First sync: back-fills up to ~13 months, 10 days per request (the most the API accepts). Later
+  syncs, every 6 hours, re-read the last 3 days (the meter network can deliver late) and keep
+  probing a little further back in case Bright has fetched more history.
+- Until Bright has any data, each sync costs one request per meter.
+
+Gas turns boiler hours into energy; with a combi boiler it also includes hot water. Electricity
+shows any electric heaters used alongside the radiators. A failed sync never affects the hub
+poll, is retried after an hour, and shows as `wiser_glow_up 0`.
+
 ### Data tiers
 
 The site picks a tier from the visible range, and switches as you zoom, so a ten-year view fetches one small
@@ -172,9 +189,11 @@ last success, and both cadences.
 `http://<host>:9109/metrics` exposes Prometheus metrics, scraped by VictoriaMetrics:
 `wiser_build_info`, `wiser_last_success_timestamp_seconds` (alert when `time() -` it
 exceeds ~1800), `wiser_hub_up`, `wiser_weather_up`, `wiser_publish_up`,
-`wiser_openmeteo_up`, `wiser_openmeteo_last_success_timestamp_seconds` (alert when
-`time() -` it exceeds a day or so), `wiser_cycles_total` and `wiser_failures_total`. Grafana also alerts on the weather
-API and the S3 publish failing.
+`wiser_openmeteo_up`, `wiser_openmeteo_last_success_timestamp_seconds`, `wiser_glow_up`,
+`wiser_glow_last_success_timestamp_seconds`,
+`wiser_glow_latest_reading_timestamp_seconds{classifier="…"}` (only when the smart meter is
+set up), `wiser_cycles_total` and `wiser_failures_total`. Grafana also alerts on the weather
+API and the S3 publish failing, and on the Open-Meteo sync going 12 hours without a success.
 
 `/healthz` on the collector returns 503 once the last success is over 30 minutes old,
 and the container healthcheck uses it. The web container's healthcheck just checks
@@ -213,6 +232,7 @@ collector/config.py    environment parsing, validated at startup
 collector/hub.py       Wiser hub client + response parsing
 collector/weather.py   OpenWeatherMap One Call 4.0 client (scrubs the API key)
 collector/openmeteo.py Open-Meteo hourly back-fill and top-up
+collector/glow.py      smart-meter gas and electricity via Bright (Glowmarkt API)
 collector/store.py     SQLite schema, writes, and the rollup queries
 collector/publish.py   static file generation + S3 upload
 collector/main.py      scheduler, metrics endpoint, cycle orchestration
