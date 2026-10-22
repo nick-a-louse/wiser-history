@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .config import Config, ConfigError
 from .hub import Hub, HubError, geo_position, parse
+from .openmeteo import OpenMeteo, OpenMeteoError, sync as openmeteo_sync
 from .publish import S3Publisher, backup_db, generate
 from .store import Store, iso, utcnow
 from .weather import Weather, WeatherError
@@ -37,7 +38,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("wiser")
 
 # Release number; the image build adds its git commit (APP_VERSION, e.g. "sha-7eec055...").
-RELEASE = "1.1.0"
+RELEASE = "1.2.0"
 _build = os.environ.get("APP_VERSION", "").strip()
 VERSION = RELEASE if not _build or _build.lstrip("v") == RELEASE else "%s (%s)" % (RELEASE, _build[:11])
 
@@ -46,6 +47,9 @@ STATE = {
     "last_hub_ok": 0,
     "last_weather_ok": 0,
     "last_publish_ok": 0,
+    "last_openmeteo_ok": 0,
+    "openmeteo_last_success_epoch": 0.0,
+    "openmeteo_next_epoch": 0.0,      # 0 = due now (first cycle after start-up)
     "cycles": 0,
     "failures": 0,
 }
@@ -91,6 +95,12 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "# HELP wiser_publish_up Whether the most recent S3 publish succeeded.\n"
             "# TYPE wiser_publish_up gauge\n"
             "wiser_publish_up %d\n"
+            "# HELP wiser_openmeteo_up Whether the most recent Open-Meteo sync succeeded.\n"
+            "# TYPE wiser_openmeteo_up gauge\n"
+            "wiser_openmeteo_up %d\n"
+            "# HELP wiser_openmeteo_last_success_timestamp_seconds Unix time of the last successful Open-Meteo sync.\n"
+            "# TYPE wiser_openmeteo_last_success_timestamp_seconds gauge\n"
+            "wiser_openmeteo_last_success_timestamp_seconds %.0f\n"
             "# HELP wiser_cycles_total Completed collection cycles.\n"
             "# TYPE wiser_cycles_total counter\n"
             "wiser_cycles_total %d\n"
@@ -99,6 +109,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "wiser_failures_total %d\n"
         ) % (STATE["last_success_epoch"], age, STATE["last_hub_ok"],
              STATE["last_weather_ok"], STATE["last_publish_ok"],
+             STATE["last_openmeteo_ok"], STATE["openmeteo_last_success_epoch"],
              STATE["cycles"], STATE["failures"])
 
         self.send_response(200)
@@ -116,12 +127,41 @@ def serve_metrics(port):
     log.info("metrics listening on :%d/metrics", port)
 
 
-def cycle(cfg, store, hub, weather, publisher, count):
+# After a failed Open-Meteo sync, try again after this long - not every cycle,
+# which would hit a struggling free service 12 times an hour.
+OPENMETEO_RETRY_SECONDS = 3600
+
+
+def openmeteo_due(cfg):
+    return cfg.openmeteo_enabled and time.time() >= STATE["openmeteo_next_epoch"]
+
+
+def run_openmeteo(cfg, store, client, raw, now):
+    """Sync weather_hourly. Returns (ok, error). Never raises, and never touches
+    the hub data: an Open-Meteo outage must not cost a single 5-minute reading."""
+    try:
+        lat, lon = geo_position(raw)
+        start = cfg.openmeteo_start or (store.coverage().get("first") or iso(now))[:10]
+        openmeteo_sync(store, client, lat, lon, start, now, cfg.openmeteo_recent_days)
+        STATE["openmeteo_last_success_epoch"] = time.time()
+        STATE["openmeteo_next_epoch"] = time.time() + cfg.openmeteo_every_hours * 3600
+        return True, None
+    except (OpenMeteoError, HubError) as exc:
+        error = str(exc)
+    except Exception as exc:              # a bug here must not stop the hub loop
+        log.exception("unexpected error in open-meteo sync")
+        error = "open-meteo: %s" % type(exc).__name__
+    log.error("open-meteo sync failed: %s", error)
+    STATE["openmeteo_next_epoch"] = time.time() + OPENMETEO_RETRY_SECONDS
+    return False, error
+
+
+def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None):
     """One collection cycle. Never raises: a failure is data, not a crash."""
     started = time.time()
     now = utcnow()
     ts = iso(now)
-    hub_ok = weather_ok = publish_ok = None
+    hub_ok = weather_ok = publish_ok = openmeteo_ok = None
     error = None
 
     try:
@@ -151,6 +191,13 @@ def cycle(cfg, store, hub, weather, publisher, count):
             error = "; ".join(filter(None, [error, str(exc)]))
             log.error("weather poll failed: %s", exc)
 
+    # Hourly back-fill, every few hours. After the hub and OWM, so it can only
+    # ever delay their next cycle, never this one's readings.
+    if raw is not None and openmeteo is not None and openmeteo_due(cfg):
+        openmeteo_ok, om_error = run_openmeteo(cfg, store, openmeteo, raw, now)
+        if om_error:
+            error = "; ".join(filter(None, [error, om_error]))
+
     if hub_ok:
         try:
             written = generate(store, cfg.publish_dir, cfg.poll_seconds,
@@ -167,7 +214,8 @@ def cycle(cfg, store, hub, weather, publisher, count):
             log.error("publish failed: %s", exc)
 
     duration_ms = int((time.time() - started) * 1000)
-    store.record_run(ts, bool(hub_ok), weather_ok, publish_ok, duration_ms, error)
+    store.record_run(ts, bool(hub_ok), weather_ok, publish_ok, duration_ms, error,
+                     openmeteo_ok)
     store.commit()
 
     STATE["last_hub_ok"] = int(bool(hub_ok))
@@ -175,6 +223,8 @@ def cycle(cfg, store, hub, weather, publisher, count):
         STATE["last_weather_ok"] = int(weather_ok)
     if publish_ok is not None:
         STATE["last_publish_ok"] = int(publish_ok)
+    if openmeteo_ok is not None:
+        STATE["last_openmeteo_ok"] = int(openmeteo_ok)
     STATE["cycles"] += 1
     if error:
         STATE["failures"] += 1
@@ -193,6 +243,7 @@ def main():
     store = Store(cfg.db_path)
     hub = Hub(cfg.hub_ip, cfg.hub_secret, cfg.http_timeout)
     weather = Weather(cfg.owm_key, cfg.http_timeout)
+    openmeteo = OpenMeteo(max(cfg.http_timeout, 30)) if cfg.openmeteo_enabled else None
 
     try:
         publisher = S3Publisher(cfg.s3_bucket)
@@ -209,7 +260,7 @@ def main():
     count = 0
     while not stopping.is_set():
         try:
-            cycle(cfg, store, hub, weather, publisher, count)
+            cycle(cfg, store, hub, weather, publisher, count, openmeteo)
         except Exception:
             STATE["failures"] += 1
             log.exception("unexpected error in collection cycle")

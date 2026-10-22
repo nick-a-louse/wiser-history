@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import tempfile
 
 log = logging.getLogger("wiser.publish")
@@ -82,15 +83,38 @@ def generate(store, out_dir, poll_seconds, weather_seconds=None):
 
 
 def backup_db(db_path, out_dir):
-    """Gzip the SQLite file so S3 backs up the source of truth, not just the
-    derived views."""
+    """Gzip a snapshot of the database so S3 backs up the source of truth, not
+    just the derived views.
+
+    Uses SQLite's backup API, not a file copy. The database runs in WAL mode,
+    where recent writes sit in wiser.db-wal until SQLite checkpoints them into
+    wiser.db (every ~4 MB of writes). Copying wiser.db alone silently left
+    those hours out of every backup - up to several hours of readings, and once
+    even a whole new table. The backup API reads through the WAL, so the
+    snapshot holds everything committed so far.
+    """
     rel = "backup/wiser.db.gz"
     dest = os.path.join(out_dir, rel)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    snapshot = dest + ".snapshot.db"
     tmp = dest + ".tmp"
-    with open(db_path, "rb") as src, gzip.open(tmp, "wb") as dst:
-        shutil.copyfileobj(src, dst)
-    os.replace(tmp, dest)
+    try:
+        if os.path.exists(snapshot):
+            os.unlink(snapshot)         # left by a crash mid-backup
+        src = sqlite3.connect(db_path, timeout=30)
+        dst = sqlite3.connect(snapshot)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        with open(snapshot, "rb") as raw, gzip.open(tmp, "wb") as gz:
+            shutil.copyfileobj(raw, gz)
+        os.replace(tmp, dest)
+    finally:
+        for leftover in (snapshot, tmp):
+            if os.path.exists(leftover):
+                os.unlink(leftover)
     return rel
 
 
