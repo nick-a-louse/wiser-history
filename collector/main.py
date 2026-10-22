@@ -18,6 +18,7 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .config import Config, ConfigError
+from .glow import Glow, GlowError, latest_readings as glow_latest, sync as glow_sync
 from .hub import Hub, HubError, geo_position, parse
 from .openmeteo import OpenMeteo, OpenMeteoError, sync as openmeteo_sync
 from .publish import S3Publisher, backup_db, generate
@@ -38,7 +39,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("wiser")
 
 # Release number; the image build adds its git commit (APP_VERSION, e.g. "sha-7eec055...").
-RELEASE = "1.2.0"
+RELEASE = "1.3.0"
 _build = os.environ.get("APP_VERSION", "").strip()
 VERSION = RELEASE if not _build or _build.lstrip("v") == RELEASE else "%s (%s)" % (RELEASE, _build[:11])
 
@@ -50,6 +51,10 @@ STATE = {
     "last_openmeteo_ok": 0,
     "openmeteo_last_success_epoch": 0.0,
     "openmeteo_next_epoch": 0.0,      # 0 = due now (first cycle after start-up)
+    "last_glow_ok": 0,
+    "glow_last_success_epoch": 0.0,
+    "glow_next_epoch": 0.0,
+    "glow_latest": {},                # {classifier: unix time of newest stored half-hour}
     "cycles": 0,
     "failures": 0,
 }
@@ -112,6 +117,20 @@ class MetricsHandler(BaseHTTPRequestHandler):
              STATE["last_openmeteo_ok"], STATE["openmeteo_last_success_epoch"],
              STATE["cycles"], STATE["failures"])
 
+        if STATE["glow_latest"] or STATE["last_glow_ok"] or STATE["glow_last_success_epoch"]:
+            body += (
+                "# HELP wiser_glow_up Whether the most recent smart-meter (Bright) sync succeeded.\n"
+                "# TYPE wiser_glow_up gauge\n"
+                "wiser_glow_up %d\n"
+                "# HELP wiser_glow_last_success_timestamp_seconds Unix time of the last successful smart-meter sync.\n"
+                "# TYPE wiser_glow_last_success_timestamp_seconds gauge\n"
+                "wiser_glow_last_success_timestamp_seconds %.0f\n"
+                "# HELP wiser_glow_latest_reading_timestamp_seconds Unix time of the newest stored half-hour, per meter (0 = none yet).\n"
+                "# TYPE wiser_glow_latest_reading_timestamp_seconds gauge\n"
+            ) % (STATE["last_glow_ok"], STATE["glow_last_success_epoch"])
+            for classifier, ts in sorted(STATE["glow_latest"].items()):
+                body += 'wiser_glow_latest_reading_timestamp_seconds{classifier="%s"} %.0f\n' % (classifier, ts)
+
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4")
         self.end_headers()
@@ -156,12 +175,42 @@ def run_openmeteo(cfg, store, client, raw, now):
     return False, error
 
 
-def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None):
+# Same back-off as Open-Meteo after a failed smart-meter sync.
+GLOW_RETRY_SECONDS = 3600
+
+
+def glow_due(cfg):
+    return cfg.glow_enabled and time.time() >= STATE["glow_next_epoch"]
+
+
+def run_glow(cfg, store, client, now):
+    """Sync energy_halfhourly from Bright. Returns (ok, error). Never raises."""
+    try:
+        glow_sync(store, client, cfg.glow_classifiers, cfg.glow_history_days, now)
+        STATE["glow_last_success_epoch"] = time.time()
+        STATE["glow_next_epoch"] = time.time() + cfg.glow_every_hours * 3600
+        ok, error = True, None
+    except GlowError as exc:
+        ok, error = False, str(exc)
+    except Exception as exc:              # a bug here must not stop the hub loop
+        log.exception("unexpected error in glow sync")
+        ok, error = False, "glow: %s" % type(exc).__name__
+    if not ok:
+        log.error("glow sync failed: %s", error)
+        STATE["glow_next_epoch"] = time.time() + GLOW_RETRY_SECONDS
+    try:
+        STATE["glow_latest"] = glow_latest(store, cfg.glow_classifiers)
+    except Exception:
+        log.exception("couldn't read the newest smart-meter readings")
+    return ok, error
+
+
+def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None, glow=None):
     """One collection cycle. Never raises: a failure is data, not a crash."""
     started = time.time()
     now = utcnow()
     ts = iso(now)
-    hub_ok = weather_ok = publish_ok = openmeteo_ok = None
+    hub_ok = weather_ok = publish_ok = openmeteo_ok = glow_ok = None
     error = None
 
     try:
@@ -198,6 +247,13 @@ def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None):
         if om_error:
             error = "; ".join(filter(None, [error, om_error]))
 
+    # Smart-meter energy, every few hours. Doesn't need the hub (the meter
+    # data comes from Bright), so it runs even if the hub poll failed.
+    if glow is not None and glow_due(cfg):
+        glow_ok, glow_error = run_glow(cfg, store, glow, now)
+        if glow_error:
+            error = "; ".join(filter(None, [error, glow_error]))
+
     if hub_ok:
         try:
             written = generate(store, cfg.publish_dir, cfg.poll_seconds,
@@ -215,7 +271,7 @@ def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None):
 
     duration_ms = int((time.time() - started) * 1000)
     store.record_run(ts, bool(hub_ok), weather_ok, publish_ok, duration_ms, error,
-                     openmeteo_ok)
+                     openmeteo_ok, glow_ok)
     store.commit()
 
     STATE["last_hub_ok"] = int(bool(hub_ok))
@@ -225,6 +281,8 @@ def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None):
         STATE["last_publish_ok"] = int(publish_ok)
     if openmeteo_ok is not None:
         STATE["last_openmeteo_ok"] = int(openmeteo_ok)
+    if glow_ok is not None:
+        STATE["last_glow_ok"] = int(glow_ok)
     STATE["cycles"] += 1
     if error:
         STATE["failures"] += 1
@@ -244,6 +302,7 @@ def main():
     hub = Hub(cfg.hub_ip, cfg.hub_secret, cfg.http_timeout)
     weather = Weather(cfg.owm_key, cfg.http_timeout)
     openmeteo = OpenMeteo(max(cfg.http_timeout, 30)) if cfg.openmeteo_enabled else None
+    glow = Glow(cfg.glow_username, cfg.glow_password, max(cfg.http_timeout, 30)) if cfg.glow_enabled else None
 
     try:
         publisher = S3Publisher(cfg.s3_bucket)
@@ -260,7 +319,7 @@ def main():
     count = 0
     while not stopping.is_set():
         try:
-            cycle(cfg, store, hub, weather, publisher, count, openmeteo)
+            cycle(cfg, store, hub, weather, publisher, count, openmeteo, glow)
         except Exception:
             STATE["failures"] += 1
             log.exception("unexpected error in collection cycle")

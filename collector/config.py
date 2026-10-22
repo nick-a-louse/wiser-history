@@ -61,6 +61,20 @@ class Config:
         if not 1 <= self.openmeteo_recent_days <= 92:
             raise ConfigError("OPENMETEO_RECENT_DAYS must be between 1 and 92")
 
+        # Smart-meter energy via Hildebrand Glow's Bright service. Optional:
+        # off unless both the Bright login settings are present.
+        self.glow_username = os.environ.get("GLOW_USERNAME", "").strip() or None
+        self.glow_password = os.environ.get("GLOW_PASSWORD", "").strip() or None
+        if bool(self.glow_username) != bool(self.glow_password):
+            raise ConfigError("Set both GLOW_USERNAME and GLOW_PASSWORD (your Bright app login), or neither")
+        self.glow_enabled = bool(self.glow_username)
+        self.glow_every_hours = _int("GLOW_EVERY_HOURS", 6)
+        self.glow_history_days = _int("GLOW_HISTORY_DAYS", 395)    # ~13 months, what Bright offers
+        self.glow_classifiers = [c.strip() for c in os.environ.get(
+            "GLOW_CLASSIFIERS", "gas.consumption,electricity.consumption").split(",") if c.strip()]
+        if self.glow_enabled and not self.glow_classifiers:
+            raise ConfigError("GLOW_CLASSIFIERS is empty")
+
         self.metrics_port = _int("METRICS_PORT", 9109)
         self.http_timeout = _int("HTTP_TIMEOUT", 20)
 
@@ -68,8 +82,9 @@ class Config:
         # Deliberately lists no secret values - see the wiser.log incident.
         return (
             "Config(hub=%s, bucket=%s, poll=%ss, weather_every=%s, s3_every=%s,"
-            " openmeteo=%s every %sh)"
+            " openmeteo=%s every %sh, glow=%s)"
             % (self.hub_ip, self.s3_bucket, self.poll_seconds,
                self.weather_every, self.s3_every,
-               "on" if self.openmeteo_enabled else "off", self.openmeteo_every_hours)
+               "on" if self.openmeteo_enabled else "off", self.openmeteo_every_hours,
+               "on" if self.glow_enabled else "off")
         )
