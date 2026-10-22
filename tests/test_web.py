@@ -35,3 +35,15 @@ def test_dockerfile_copies_every_file_the_page_uses():
     for f in ["index.html", "app.js", "app.css", "gomez-ui.css", "gomez-ui.js", "manifest.webmanifest",
               "icon.svg", "favicon.ico", "favicon-32.png", "apple-touch-icon.png", "fonts/"]:
         assert f in docker, f
+
+
+def test_nginx_serves_only_the_data_folder():
+    """published/ also holds backup/wiser.db.gz, a copy of the whole database
+    (occupancy data). Only published/data/ may reach a browser."""
+    conf = read("nginx.conf")
+    assert "location ^~ /published/data/ {" in conf
+    block = conf.split("location ^~ /published/ {", 1)[1].split("}", 1)[0]
+    assert "return 404;" in block
+    # ^~ on both, or a regex location (e.g. the icon rule) could still serve a
+    # matching file from inside published/.
+    assert "location /published/" not in conf

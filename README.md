@@ -100,7 +100,8 @@ published/backup/     gzipped DB, mirrored to S3
 ```
 
 The web container mounts `published/` **read-only**, so the site renders the data
-and can never alter it. S3 holds a private off-site copy. The IAM user has
+and can never alter it. nginx serves only `published/data/`; everything else there,
+including the database backup, returns 404. S3 holds a private off-site copy. The IAM user has
 `PutObject` and nothing else, so a misbehaving collector cannot read or destroy
 its own backup.
 
