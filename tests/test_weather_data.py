@@ -277,3 +277,32 @@ def test_metrics_include_openmeteo():
     h.do_GET()
     body = h.wfile.getvalue().decode()
     assert "wiser_openmeteo_up " in body and "wiser_openmeteo_last_success_timestamp_seconds " in body
+
+
+# ------------------------------------------------------------------ backup
+
+def test_backup_includes_writes_still_in_the_wal(tmp_path):
+    """The DB runs in WAL mode. A plain file copy missed everything not yet
+    checkpointed - here, the whole weather_hourly table and its rows."""
+    import gzip
+    from collector.publish import backup_db
+
+    path = str(tmp_path / "wiser.db")
+    store = Store(path)
+    store.record_weather_hourly(openmeteo.parse(om_response("2026-08-04T00:00", hours=24 * 30)), "archive", "t")
+    store.record_weather("2026-10-22T12:00:00Z", weather._row(owm_current(rain={"1h": 0.6})))
+    store.commit()
+    assert os.path.getsize(path + "-wal") > 0          # the data really is only in the WAL
+
+    rel = backup_db(path, str(tmp_path / "published"))
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(gzip.open(tmp_path / "published" / rel).read())
+    conn = sqlite3.connect(str(restored))
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert conn.execute("SELECT COUNT(*) FROM weather_hourly").fetchone()[0] == 24 * 30
+    assert conn.execute("SELECT rain_1h_mm FROM weather").fetchone()[0] == 0.6
+
+    # Only the .gz is left behind, and the live database carries on as normal.
+    assert sorted(os.listdir(tmp_path / "published" / "backup")) == ["wiser.db.gz"]
+    store.record_weather("2026-10-22T12:15:00Z", weather._row(owm_current()))
+    store.commit()
