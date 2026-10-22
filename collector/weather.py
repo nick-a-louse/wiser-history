@@ -53,6 +53,17 @@ class Weather:
         return _row(data[0])
 
 
+def _amount(cur, key):
+    """Rain or snow in the last hour, mm.
+
+    OWM leaves `rain`/`snow` out entirely when there is none ("did not occur at
+    the time of measurement"), so absent means 0, not unknown. Without this
+    the dry hours would be NULL and look like missing data.
+    """
+    value = (cur.get(key) or {}).get("1h")
+    return float(value) if value is not None else 0.0
+
+
 def _row(cur):
     conditions = (cur.get("weather") or [{}])[0]
     return {
@@ -69,6 +80,10 @@ def _row(cur):
         "wind_deg": cur.get("wind_deg"),
         "uvi": cur.get("uvi"),
         "visibility": cur.get("visibility"),
+        # Amounts, not just the "Rain"/"Snow" label: data.rain.1h / data.snow.1h, mm/h.
+        "rain_1h_mm": _amount(cur, "rain"),
+        "snow_1h_mm": _amount(cur, "snow"),
+        "condition_id": conditions.get("id"),   # e.g. 500 light rain vs 502 heavy rain
         "condition": conditions.get("main"),
         "description": conditions.get("description"),
         "sunrise_unix": cur.get("sunrise"),

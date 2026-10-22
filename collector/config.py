@@ -4,6 +4,7 @@ Everything is validated at startup so a misconfiguration fails immediately and
 loudly, rather than at 03:00 on the first cold night.
 """
 import os
+from datetime import datetime
 
 
 class ConfigError(RuntimeError):
@@ -46,13 +47,29 @@ class Config:
         self.s3_every = _int("S3_EVERY_N_POLLS", 12)
         self.db_backup_every = _int("DB_BACKUP_EVERY_N_POLLS", 288)
 
+        # Open-Meteo hourly back-fill (no key needed). On by default.
+        self.openmeteo_enabled = os.environ.get("OPENMETEO_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+        self.openmeteo_every_hours = _int("OPENMETEO_EVERY_HOURS", 6)
+        self.openmeteo_recent_days = _int("OPENMETEO_RECENT_DAYS", 7)
+        # First day to back-fill. Empty = the day logging began (first hub sample).
+        self.openmeteo_start = os.environ.get("OPENMETEO_START", "").strip() or None
+        if self.openmeteo_start:
+            try:
+                datetime.strptime(self.openmeteo_start, "%Y-%m-%d")
+            except ValueError:
+                raise ConfigError("OPENMETEO_START must be YYYY-MM-DD, got %r" % self.openmeteo_start)
+        if not 1 <= self.openmeteo_recent_days <= 92:
+            raise ConfigError("OPENMETEO_RECENT_DAYS must be between 1 and 92")
+
         self.metrics_port = _int("METRICS_PORT", 9109)
         self.http_timeout = _int("HTTP_TIMEOUT", 20)
 
     def __repr__(self):
         # Deliberately lists no secret values - see the wiser.log incident.
         return (
-            "Config(hub=%s, bucket=%s, poll=%ss, weather_every=%s, s3_every=%s)"
+            "Config(hub=%s, bucket=%s, poll=%ss, weather_every=%s, s3_every=%s,"
+            " openmeteo=%s every %sh)"
             % (self.hub_ip, self.s3_bucket, self.poll_seconds,
-               self.weather_every, self.s3_every)
+               self.weather_every, self.s3_every,
+               "on" if self.openmeteo_enabled else "off", self.openmeteo_every_hours)
         )

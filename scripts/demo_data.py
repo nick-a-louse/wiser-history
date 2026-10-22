@@ -35,6 +35,7 @@ def build(out_dir, days=60, end=None, seed=7):
     end -= timedelta(minutes=end.minute % 5)
     t = end - timedelta(days=days)
     gap_from, gap_to = end - timedelta(days=9, hours=3), end - timedelta(days=9)   # a visible outage
+    hourly, raining = [], False
     while t <= end:
         ts = t.strftime("%Y-%m-%dT%H:%M:%SZ")
         if gap_from <= t < gap_to:
@@ -57,11 +58,24 @@ def build(out_dir, days=60, end=None, seed=7):
         store.record_rooms(ts, rooms)
         store.record_sample(ts, {"hub_unix_time": int(t.timestamp()), "boiler_relay": "On" if heating else "Off",
                                  "boiler_demand": 60 if heating else 0, "system_mode": "Normal", "away_mode": 0}, rooms, [])
+        if t.minute == 0:                                          # spells of rain lasting a few hours
+            raining = random.random() < (0.75 if raining else 0.06)
+        rain = round(random.uniform(0.2, 2.5), 1) if raining else 0.0
         if t.minute % 15 == 0:
             store.record_weather(ts, {"observed_unix": int(t.timestamp()), "temp_c": round(outside, 1), "feels_like_c": round(outside - 2, 1),
-                                      "humidity_pct": int(80 + random.gauss(0, 4)), "clouds_pct": 60, "condition": "Clouds"})
+                                      "humidity_pct": int(80 + random.gauss(0, 4)), "clouds_pct": 95 if raining else 60,
+                                      "rain_1h_mm": rain, "snow_1h_mm": 0.0, "condition_id": 501 if raining else 803,
+                                      "condition": "Rain" if raining else "Clouds"})
+        if t.minute == 0:                                          # Open-Meteo's hourly table, as the archive fills it
+            sw = round(450 * sun * (0.25 if raining else 0.7), 1)
+            hourly.append({"ts_utc": ts, "temp_c": round(outside, 1), "humidity_pct": 90 if raining else 78,
+                           "cloud_pct": 95 if raining else 60, "shortwave_wm2": sw, "direct_wm2": round(sw * 0.4, 1),
+                           "diffuse_wm2": round(sw * 0.6, 1), "precipitation_mm": rain, "rain_mm": rain, "snowfall_cm": 0.0,
+                           "wind_speed": round(abs(random.gauss(4, 2)), 1), "wind_gust": round(abs(random.gauss(8, 3)), 1),
+                           "wind_deg": random.choice([200, 225, 250, 270])})
         store.record_run(ts, True, t.minute % 15 == 0, True, 900)
         t += timedelta(minutes=5)
+    store.record_weather_hourly(hourly, "archive", end.strftime("%Y-%m-%dT%H:%M:%SZ"))
     store.conn.commit()
     written = publish.generate(store, os.path.join(out_dir, "published"), 300, 900)
     store.close()

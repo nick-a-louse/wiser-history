@@ -23,6 +23,17 @@ def test_publish_writes_every_tier(tmp_path):
     assert {"day", "room_id", "min_c", "max_c", "mean_c"} <= set(r)   # the room table's "widest day" needs min/max
 
 
+def test_demo_database_has_rain_and_sunlight(tmp_path):
+    """The demo DB is what the ML notebook (TECH-98) is first tried on."""
+    import sqlite3
+    demo_data.build(str(tmp_path), days=12)
+    conn = sqlite3.connect(str(tmp_path / "wiser.db"))
+    hours, sunny, wet = conn.execute(
+        "SELECT COUNT(*), SUM(shortwave_wm2 > 0), SUM(rain_mm > 0) FROM weather_hourly").fetchone()
+    assert hours >= 12 * 24 - 4 and sunny > 0 and wet > 0
+    assert conn.execute("SELECT SUM(rain_1h_mm > 0) FROM weather").fetchone()[0] > 0
+
+
 def test_build_info_metric():
     from collector import main
     assert main.VERSION.startswith(main.RELEASE)

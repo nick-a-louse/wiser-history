@@ -15,7 +15,7 @@ so either can be rewritten without touching the other:
 
 | | What it does |
 |---|---|
-| **`collector/`** | Polls the Wiser hub and OpenWeatherMap, stores everything in SQLite, generates the static data files, mirrors them to a private S3 bucket |
+| **`collector/`** | Polls the Wiser hub and OpenWeatherMap, back-fills hourly weather from Open-Meteo, stores everything in SQLite, generates the static data files, mirrors them to a private S3 bucket |
 | **`web/`** | nginx serving a single-page ECharts site that reads those files |
 
 The website:
@@ -63,6 +63,7 @@ here are direct responses to that:
 | Rooms keyed on hub id, never name | A rename would otherwise fragment the history silently |
 | UTC everywhere | The hub reports `TimeZoneOffset: 0` while sitting in BST |
 | Weather responses scrubbed | OWM embeds the API key in the `prev`/`next` URLs it returns |
+| A second, hourly weather source | OWM can't be back-filled: weather not captured at the time is gone. Open-Meteo has history, and measured sunlight |
 | `botocore` pinned below DEBUG | That logger put an AWS key id into the old world-readable `wiser.log` |
 
 The room-id decision has since proved itself: two rooms were renamed in August
@@ -119,8 +120,32 @@ without Cloudflare Access in front.
 
 Every setting is in [.env.example](.env.example), with its default and a one-line
 explanation: the Wiser hub address and secret, the OpenWeatherMap key, AWS credentials
-and bucket, the poll cadences, and `PUID`/`PGID` (default 1003/1006, the same as my
+and bucket, the poll cadences, the Open-Meteo sync (on by default, no key), and `PUID`/`PGID` (default 1003/1006, the same as my
 other containers; `/opt/appdata/wiser` must belong to them).
+
+### Weather data
+
+Two sources, kept in separate tables because they answer different questions:
+
+| Table | Source | Every | What it adds |
+|---|---|---|---|
+| `weather` | OpenWeatherMap One Call 4.0 | 15 min | Live conditions, including `rain_1h_mm` and `snow_1h_mm` (since 1.2.0; 0 when dry, NULL before then) and the condition code |
+| `weather_hourly` | [Open-Meteo](https://open-meteo.com/en/docs/historical-weather-api) | hourly | Measured sunlight (`shortwave_wm2`, `direct_wm2`, `diffuse_wm2`), rain, snowfall (cm), cloud, wind, temperature and humidity, **back-filled from the day logging began** |
+
+Open-Meteo is free for non-commercial use and needs no key. The collector syncs it
+every 6 hours, using the location the hub reports:
+
+- **`archive`** rows come from reanalysis data, which is final but a few days behind.
+  Each sync asks only for the days that aren't complete yet.
+- **`forecast`** rows fill the most recent days from the forecast API, up to the
+  current hour (never a forecast of the future). An archive row always replaces a
+  forecast row; a forecast row never replaces an archive row.
+
+Hour labels are UTC. Temperature, humidity, cloud and wind are the values **at** that
+time; radiation is the mean, and rain and snow the total, over the **preceding** hour.
+
+A failed sync never affects the hub poll. It's retried an hour later and shows up as
+`wiser_openmeteo_up 0`.
 
 ### Data tiers
 
@@ -146,7 +171,8 @@ last success, and both cadences.
 `http://<host>:9109/metrics` exposes Prometheus metrics, scraped by VictoriaMetrics:
 `wiser_build_info`, `wiser_last_success_timestamp_seconds` (alert when `time() -` it
 exceeds ~1800), `wiser_hub_up`, `wiser_weather_up`, `wiser_publish_up`,
-`wiser_cycles_total` and `wiser_failures_total`. Grafana also alerts on the weather
+`wiser_openmeteo_up`, `wiser_openmeteo_last_success_timestamp_seconds` (alert when
+`time() -` it exceeds a day or so), `wiser_cycles_total` and `wiser_failures_total`. Grafana also alerts on the weather
 API and the S3 publish failing.
 
 `/healthz` on the collector returns 503 once the last success is over 30 minutes old,
@@ -185,6 +211,7 @@ docs/screenshots/      the pictures in this README (light and dark, desktop and 
 collector/config.py    environment parsing, validated at startup
 collector/hub.py       Wiser hub client + response parsing
 collector/weather.py   OpenWeatherMap One Call 4.0 client (scrubs the API key)
+collector/openmeteo.py Open-Meteo hourly back-fill and top-up
 collector/store.py     SQLite schema, writes, and the rollup queries
 collector/publish.py   static file generation + S3 upload
 collector/main.py      scheduler, metrics endpoint, cycle orchestration

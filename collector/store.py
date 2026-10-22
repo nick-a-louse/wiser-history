@@ -9,7 +9,7 @@ Design notes worth keeping in view:
   nothing; keying on name would silently fragment the history.
 """
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -94,7 +94,39 @@ CREATE TABLE IF NOT EXISTS weather (
     condition     TEXT,
     description   TEXT,
     sunrise_unix  INTEGER,
-    sunset_unix   INTEGER
+    sunset_unix   INTEGER,
+    rain_1h_mm    REAL,
+    snow_1h_mm    REAL,
+    condition_id  INTEGER
+);
+
+-- Hourly weather from Open-Meteo, back-filled from when logging began and
+-- topped up as it runs. Measured sunlight (W/m2) is a far better solar input
+-- than OWM's cloud % and UV, and rain/snow can be back-filled here, unlike OWM.
+--
+-- ts_utc is Open-Meteo's own hour label. Instant values (temperature, humidity,
+-- cloud, wind) are AT that time. Radiation is the mean, and rain/snow/
+-- precipitation the total, over the hour BEFORE it.
+--
+-- source: 'archive' (reanalysis, a few days behind, final) or 'forecast'
+-- (the forecast API's recent past, used until the archive catches up and then
+-- replaced). An archive row is never overwritten by a forecast row.
+CREATE TABLE IF NOT EXISTS weather_hourly (
+    ts_utc            TEXT PRIMARY KEY,
+    source            TEXT NOT NULL,
+    fetched_utc       TEXT NOT NULL,
+    temp_c            REAL,
+    humidity_pct      REAL,
+    cloud_pct         REAL,
+    shortwave_wm2     REAL,
+    direct_wm2        REAL,
+    diffuse_wm2       REAL,
+    precipitation_mm  REAL,
+    rain_mm           REAL,
+    snowfall_cm       REAL,
+    wind_speed        REAL,
+    wind_gust         REAL,
+    wind_deg          REAL
 );
 
 -- Every cycle writes a row here, successful or not. This is what makes a
@@ -106,9 +138,29 @@ CREATE TABLE IF NOT EXISTS run_log (
     weather_ok  INTEGER,
     publish_ok  INTEGER,
     duration_ms INTEGER,
-    error       TEXT
+    error       TEXT,
+    openmeteo_ok INTEGER
 );
 """
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS does nothing
+# to a table that already exists, so an existing database gets them here.
+# Add-only: existing rows keep their data and the new columns start NULL
+# (unknown) for history, which is correct - nobody recorded rain amounts then.
+MIGRATIONS = [
+    ("weather", "rain_1h_mm", "REAL"),
+    ("weather", "snow_1h_mm", "REAL"),
+    ("weather", "condition_id", "INTEGER"),
+    ("run_log", "openmeteo_ok", "INTEGER"),
+]
+
+# Values a weather_hourly row must have at least one of to be worth storing.
+# The archive returns nulls for days it hasn't reached yet.
+HOURLY_VALUES = (
+    "temp_c", "humidity_pct", "cloud_pct", "shortwave_wm2", "direct_wm2",
+    "diffuse_wm2", "precipitation_mm", "rain_mm", "snowfall_cm",
+    "wind_speed", "wind_gust", "wind_deg",
+)
 
 
 def utcnow():
@@ -134,7 +186,16 @@ class Store:
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        for table, column, kind in MIGRATIONS:
+            have = {r[1] for r in self.conn.execute("PRAGMA table_info(%s)" % table)}
+            if column not in have:
+                self.conn.execute(
+                    "ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind)
+                )
 
     def close(self):
         self.conn.close()
@@ -189,7 +250,64 @@ class Store:
         r["ts_utc"] = ts
         _insert(self.conn, "weather", r)
 
-    def record_run(self, ts, hub_ok, weather_ok, publish_ok, duration_ms, error=None):
+    def record_weather_hourly(self, rows, source, fetched_ts):
+        """Upsert Open-Meteo hours. Returns how many rows were written.
+
+        * Rows with no values at all are skipped (the archive's not-yet-
+          available days come back as nulls).
+        * 'archive' replaces anything; 'forecast' never replaces 'archive'.
+        """
+        if source not in ("archive", "forecast"):
+            raise ValueError("unknown weather_hourly source %r" % source)
+        written = 0
+        for row in rows:
+            if all(row.get(k) is None for k in HOURLY_VALUES):
+                continue
+            if source == "forecast":
+                have = self.conn.execute(
+                    "SELECT source FROM weather_hourly WHERE ts_utc=?",
+                    (row["ts_utc"],),
+                ).fetchone()
+                if have is not None and have["source"] == "archive":
+                    continue
+            r = {k: row.get(k) for k in HOURLY_VALUES}
+            r.update(ts_utc=row["ts_utc"], source=source, fetched_utc=fetched_ts)
+            _insert(self.conn, "weather_hourly", r)
+            written += 1
+        return written
+
+    def first_archive_gap_day(self, start_day, end_day):
+        """The earliest day in [start_day, end_day] (YYYY-MM-DD) without a
+        complete set of 24 archive hours, or None if every day is complete.
+
+        This makes the back-fill idempotent: each run asks the archive only for
+        what it hasn't already supplied, from wherever the history is first
+        incomplete.
+        """
+        complete = {r[0] for r in self.conn.execute(
+            "SELECT substr(ts_utc,1,10) AS day FROM weather_hourly"
+            " WHERE source='archive' AND ts_utc >= ? AND ts_utc < ?"
+            " GROUP BY day HAVING COUNT(*) >= 24",
+            (start_day, end_day + "T99"),
+        )}
+        day = datetime.strptime(start_day, "%Y-%m-%d").date()
+        end = datetime.strptime(end_day, "%Y-%m-%d").date()
+        while day <= end:
+            if day.isoformat() not in complete:
+                return day.isoformat()
+            day += timedelta(days=1)
+        return None
+
+    def hourly_coverage(self):
+        rows = self.conn.execute(
+            "SELECT source, MIN(ts_utc) AS first, MAX(ts_utc) AS last, COUNT(*) AS n"
+            " FROM weather_hourly GROUP BY source"
+        )
+        return {r["source"]: {"first": r["first"], "last": r["last"], "n": r["n"]}
+                for r in rows}
+
+    def record_run(self, ts, hub_ok, weather_ok, publish_ok, duration_ms, error=None,
+                   openmeteo_ok=None):
         _insert(self.conn, "run_log", {
             "ts_utc": ts,
             "hub_ok": int(hub_ok),
@@ -197,6 +315,7 @@ class Store:
             "publish_ok": None if publish_ok is None else int(publish_ok),
             "duration_ms": duration_ms,
             "error": error,
+            "openmeteo_ok": None if openmeteo_ok is None else int(openmeteo_ok),
         })
 
     def commit(self):
