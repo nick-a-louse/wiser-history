@@ -16,6 +16,12 @@ from collector.config import Config, ConfigError  # noqa: E402
 from collector.store import Store  # noqa: E402
 
 NOW = datetime(2026, 10, 22, 18, 40, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def no_pauses(monkeypatch):
+    monkeypatch.setattr(glow, "HISTORY_PAUSE_SECONDS", 0)
+    monkeypatch.setattr(glow, "RETRY_AFTER_SECONDS", 0)
 CLASSIFIERS = ["gas.consumption", "electricity.consumption"]
 
 
@@ -23,10 +29,11 @@ class FakeBright:
     """Meter data exists from `history_from` to `lag` before now."""
 
     def __init__(self, history_from=None, lag=timedelta(hours=2), resources=CLASSIFIERS,
-                 fail_login=False, holes=()):
+                 fail_login=False, holes=(), flaky=None):
         self.history_from = history_from
         self.holes = list(holes)          # [(start, end)] Bright doesn't have (yet)
         self.now = NOW                    # the meter's clock; tests that move time move it too
+        self.flaky = flaky                # callable(start) -> True to drop that request
         self.lag = lag
         self.available = {c: "id-" + c for c in resources}
         self.fail_login = fail_login
@@ -46,6 +53,8 @@ class FakeBright:
 
     def readings(self, token, rid, start, end):
         self.calls.append(("readings", rid, start, end))
+        if self.flaky and self.flaky(start):
+            raise glow.GlowError("glow request failed: RemoteDisconnected")
         if end - start > timedelta(days=glow.CHUNK_DAYS):
             raise glow.GlowError("glow resource: HTTP 400")       # like the real API at 31 days
         rows, t = [], start
@@ -401,3 +410,34 @@ def test_log_counts_new_readings_not_rereads(tmp_path, caplog):
         result = glow.sync(store, bright, ["gas.consumption"], 395, NOW)   # same moment: nothing new
     assert result == {"gas.consumption": 0}
     assert "gas.consumption +0 new (" in caplog.text and "re-read)" in caplog.text
+
+
+# ------------------------------------------------------------------ flaky service
+
+def test_a_failing_chunk_is_skipped_not_fatal(tmp_path):
+    """Seen live: one dropped connection ended the whole sync."""
+    store = Store(str(tmp_path / "w.db"))
+    bad = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    bright = FakeBright(history_from=datetime(2025, 10, 1, tzinfo=timezone.utc),
+                        flaky=lambda start: start.date() == glow._grid_floor(bad).date())
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)          # no exception
+    first, _ = store.energy_range("gas.consumption")
+    assert first[:7] == "2025-10"                                    # history either side arrived
+    lo = glow._grid_floor(bad)
+    assert store.energy_count("gas.consumption", glow._iso(lo), glow._iso(lo + timedelta(days=10))) == 0
+    assert glow._iso(lo) not in store.energy_chunks("gas.consumption")   # not counted as a try
+
+    bright.flaky = None                                              # service recovers
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
+    assert store.energy_count("gas.consumption", glow._iso(lo), glow._iso(lo + timedelta(days=10))) == 480
+
+
+def test_history_stops_after_three_failures_in_a_row(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    recent = NOW - timedelta(days=12)
+    bright = FakeBright(history_from=datetime(2025, 10, 1, tzinfo=timezone.utc),
+                        flaky=lambda start: start < recent)              # all history requests fail
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    history_calls = [c for c in bright.readings_calls() if c[2] < recent]
+    assert len(history_calls) == glow.HISTORY_FAILURES_TO_STOP
+    assert store.energy_range("gas.consumption")[1] is not None          # recent data still saved
