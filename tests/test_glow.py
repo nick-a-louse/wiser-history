@@ -321,3 +321,57 @@ def test_missing_metric_is_published(tmp_path, fresh_state, monkeypatch):
                         holes=[(NOW - timedelta(days=20), NOW - timedelta(days=19))])
     main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
     assert main.STATE["glow_missing"] == {"gas.consumption": 48, "electricity.consumption": 48}
+
+
+# ------------------------------------------------------------------ retries and logging
+
+def _urlopen_sequence(monkeypatch, outcomes):
+    """Make urlopen raise or answer from a list, one item per call."""
+    import io, json as _json, urllib.error
+    calls = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    def fake(req, timeout=None):
+        calls.append(req.full_url)
+        item = outcomes.pop(0)
+        if isinstance(item, int):
+            raise urllib.error.HTTPError(req.full_url, item, "x", {}, None)
+        if isinstance(item, Exception):
+            raise item
+        return Resp(_json.dumps(item).encode())
+    monkeypatch.setattr(glow.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(glow, "RETRY_AFTER_SECONDS", 0)
+    return calls
+
+
+def test_dropped_connection_is_retried_once(monkeypatch):
+    from http.client import RemoteDisconnected
+    calls = _urlopen_sequence(monkeypatch, [RemoteDisconnected("gone"), {"units": "kWh", "data": []}])
+    assert glow.Glow("u", "p").readings("tok", "rid", NOW - timedelta(days=1), NOW) == ("kWh", [])
+    assert len(calls) == 2
+
+
+def test_server_errors_retry_but_bad_requests_do_not(monkeypatch):
+    calls = _urlopen_sequence(monkeypatch, [503, 503])
+    with pytest.raises(glow.GlowError, match="HTTP 503"):
+        glow.Glow("u", "p").readings("tok", "rid", NOW - timedelta(days=1), NOW)
+    assert len(calls) == 2
+    calls = _urlopen_sequence(monkeypatch, [400])
+    with pytest.raises(glow.GlowError, match="HTTP 400"):
+        glow.Glow("u", "p").readings("tok", "rid", NOW - timedelta(days=1), NOW)
+    assert len(calls) == 1
+
+
+def test_log_counts_new_readings_not_rereads(tmp_path, caplog):
+    import logging
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=20))
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="wiser.glow"):
+        result = glow.sync(store, bright, ["gas.consumption"], 395, NOW)   # same moment: nothing new
+    assert result == {"gas.consumption": 0}
+    assert "gas.consumption +0 new (" in caplog.text and "re-read)" in caplog.text

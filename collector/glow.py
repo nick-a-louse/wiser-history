@@ -17,6 +17,7 @@ the password, the token, a URL or a resource id.
 """
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,6 +38,10 @@ EMPTY_CHUNKS_TO_STOP = 2   # back-fill stops after this many empty chunks in a r
 # GAP_CHUNKS_PER_SYNC incomplete 10-day chunks per meter, least recently tried
 # first. A chunk older than GAP_GIVE_UP_DAYS that is still incomplete after
 # GAP_MAX_TRIES reads is left alone: those half-hours were never recorded.
+# One retry for a request that fails in a way that might pass: a dropped
+# connection, a timeout, HTTP 429 or a 5xx. Seen live on 2026-10-29, when
+# Bright's service was struggling. Other 4xx (bad login, bad request) fail at once.
+RETRY_AFTER_SECONDS = 5
 GAP_CHUNKS_PER_SYNC = 6
 GAP_MAX_TRIES = 6
 GAP_GIVE_UP_DAYS = 45
@@ -90,13 +95,20 @@ class Glow:
         req = urllib.request.Request(
             url, headers=headers, method="POST" if body is not None else "GET",
             data=json.dumps(body).encode() if body is not None else None)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return json.load(resp)
-        except urllib.error.HTTPError as exc:
-            raise GlowError("glow %s: HTTP %s" % (path.split("/")[0], exc.code)) from None
-        except Exception as exc:
-            raise GlowError("glow request failed: %s" % type(exc).__name__) from None
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as exc:
+                error = GlowError("glow %s: HTTP %s" % (path.split("/")[0], exc.code))
+                transient = exc.code == 429 or exc.code >= 500
+            except Exception as exc:
+                error = GlowError("glow request failed: %s" % type(exc).__name__)
+                transient = True
+            if not transient or attempt == 2:
+                raise error from None
+            log.info("glow request failed (%s); retrying once", error)
+            time.sleep(RETRY_AFTER_SECONDS)
 
     def login(self):
         body = self._call("auth", body={"username": self._username, "password": self._password})
@@ -162,11 +174,12 @@ def sync(store, client, classifiers, history_days, now):
         if c not in available:
             log.warning("glow account has no %s resource; skipping it", c)
 
-    written = {}
+    written, reread = {}, {}
     for classifier in wanted:
         rid = available[classifier]
         client.catchup(token, rid)
         count = 0
+        before = _stored(store, classifier)
 
         def fetch(lo, hi):
             units, rows = client.readings(token, rid, lo, hi)
@@ -195,10 +208,20 @@ def sync(store, client, classifiers, history_days, now):
                 store.commit()
 
         count += _fill_gaps(store, classifier, fetch, now, fetched)
-        written[classifier] = count
+        new = _stored(store, classifier) - before
+        written[classifier] = new
+        reread[classifier] = count - new
 
-    log.info("glow ok: %s", ", ".join("%s +%d" % (c, n) for c, n in written.items()))
+    # "new" is what this sync added; "re-read" is readings fetched again and
+    # rewritten unchanged (the 3-day refresh and the gap re-reads).
+    log.info("glow ok: %s", ", ".join(
+        "%s +%d new (%d re-read)" % (c, n, reread[c]) for c, n in written.items()))
     return written
+
+
+def _stored(store, classifier):
+    return store.conn.execute(
+        "SELECT COUNT(*) FROM energy_halfhourly WHERE classifier=?", (classifier,)).fetchone()[0]
 
 
 def _incomplete_chunks(store, classifier, now):
