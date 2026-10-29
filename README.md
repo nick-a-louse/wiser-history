@@ -156,15 +156,19 @@ works whoever the supplier is. The collector stores half-hourly `gas.consumption
 `electricity.consumption` (kWh) in `energy_halfhourly`:
 
 - `ts_utc` is the **start** of the half-hour. Missing half-hours aren't stored; a stored 0 is a real zero.
-- First sync: back-fills up to ~13 months, 10 days per request (the most the API accepts). Later
-  syncs, every 6 hours, re-read the last 3 days (the meter network can deliver late) and keep
-  probing a little further back in case Bright has fetched more history.
+- First sync with data: reads every 10-day stretch of the last ~13 months once (10 days is the
+  most the API accepts per request), whatever empty months lie in between. Later syncs, every
+  6 hours, re-read the last 3 days (the meter network can deliver late).
 - Until Bright has any data, each sync costs one request per meter.
+- A request that fails in a way that might pass (dropped connection, timeout, HTTP 429 or 5xx)
+  is retried once after 5 seconds; other errors fail straight away. The log line reports new
+  readings separately from ones re-read and rewritten unchanged.
 - **Gap-filling:** Bright fetches older history from the meter network bit by bit, so a stretch
   read with holes may be complete a day later. Each sync re-reads up to 6 incomplete 10-day
-  stretches per meter, least recently tried first. A stretch older than 45 days that is still
+  stretches per meter, least recently tried first and, among those, newest first. A stretch older than 45 days that is still
   incomplete after 6 reads is left alone (those half-hours were never recorded), but still
-  counted in `wiser_glow_missing_halfhours`.
+  counted in `wiser_glow_missing_halfhours`. Missing readings are never filled in with guesses;
+  analysis uses complete days only.
 
 Gas turns boiler hours into energy; with a combi boiler it also includes hot water. Electricity
 shows any electric heaters used alongside the radiators. A failed sync never affects the hub

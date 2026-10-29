@@ -39,7 +39,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("wiser")
 
 # Release number; the image build adds its git commit (APP_VERSION, e.g. "sha-7eec055...").
-RELEASE = "1.3.1"
+RELEASE = "1.3.2"
 _build = os.environ.get("APP_VERSION", "").strip()
 VERSION = RELEASE if not _build or _build.lstrip("v") == RELEASE else "%s (%s)" % (RELEASE, _build[:11])
 

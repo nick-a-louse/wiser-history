@@ -26,6 +26,7 @@ class FakeBright:
                  fail_login=False, holes=()):
         self.history_from = history_from
         self.holes = list(holes)          # [(start, end)] Bright doesn't have (yet)
+        self.now = NOW                    # the meter's clock; tests that move time move it too
         self.lag = lag
         self.available = {c: "id-" + c for c in resources}
         self.fail_login = fail_login
@@ -49,7 +50,7 @@ class FakeBright:
             raise glow.GlowError("glow resource: HTTP 400")       # like the real API at 31 days
         rows, t = [], start
         while t < end:
-            has = (self.history_from is not None and self.history_from <= t <= NOW - self.lag
+            has = (self.history_from is not None and self.history_from <= t <= self.now - self.lag
                    and not any(a <= t < b for a, b in self.holes))
             value = (0.0 if t.hour < 5 else 1.25) if has else None   # genuine zeros overnight
             rows.append((t.strftime("%Y-%m-%dT%H:%M:%SZ"), value))
@@ -116,18 +117,26 @@ def test_full_backfill_then_cheap_refreshes(tmp_path):
     assert len(bright.readings_calls()) == 2
 
 
-def test_short_history_stops_after_two_empty_chunks(tmp_path):
+def test_history_is_read_past_empty_months(tmp_path):
+    """Seen live: electricity existed for May and June, nothing for July, and the
+    first importer stopped at the empty July. Every chunk is now read once."""
     store = Store(str(tmp_path / "w.db"))
-    bright = FakeBright(history_from=NOW - timedelta(days=100))     # meter fitted 100 days ago
+    july = (NOW - timedelta(days=110), NOW - timedelta(days=80))      # a whole empty month
+    bright = FakeBright(history_from=NOW - timedelta(days=170), holes=[july])
     glow.sync(store, bright, ["gas.consumption"], 395, NOW)
     first, _ = store.energy_range("gas.consumption")
-    assert first[:10] == (NOW - timedelta(days=100)).strftime("%Y-%m-%d")
-    # 1 recent + ~10 back-fill chunks with data + 2 empty, not all 40.
-    assert len(bright.readings_calls()) <= 14
+    assert first[:10] == (NOW - timedelta(days=170)).strftime("%Y-%m-%d")
+    assert missing(store) == 30 * 48                                    # only the real hole
+    assert len(bright.readings_calls()) <= 2 + 395 // 10 + 1            # recent + each chunk once
 
+
+def test_later_syncs_only_retry_a_few_chunks(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=100))         # meter fitted 100 days ago
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
     bright.calls.clear()
     glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
-    assert len(bright.readings_calls()) <= 4                       # refresh + 2 empty probes
+    assert len(bright.readings_calls()) <= 1 + glow.GAP_CHUNKS_PER_SYNC
 
 
 def test_history_arriving_later_is_picked_up(tmp_path):
@@ -136,7 +145,8 @@ def test_history_arriving_later_is_picked_up(tmp_path):
     bright = FakeBright(history_from=NOW - timedelta(days=5))
     glow.sync(store, bright, ["gas.consumption"], 395, NOW)
     bright.history_from = NOW - timedelta(days=60)
-    glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
+    for k in (1, 2):                                   # newest chunks are retried first
+        glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6 * k))
     first, _ = store.energy_range("gas.consumption")
     assert first[:10] == (NOW - timedelta(days=60)).strftime("%Y-%m-%d")
 
@@ -262,25 +272,27 @@ def test_holes_filled_once_bright_has_them(tmp_path):
 
 def test_complete_chunks_are_never_reread(tmp_path):
     store = Store(str(tmp_path / "w.db"))
-    bright = FakeBright(history_from=NOW - timedelta(days=60))
+    start = NOW - timedelta(days=60)
+    bright = FakeBright(history_from=start)
     glow.sync(store, bright, ["gas.consumption"], 395, NOW)
     bright.calls.clear()
-    glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
-    # refresh + 2 empty probes below the oldest reading; no gap re-reads
-    assert len(bright.readings_calls()) <= 3
+    later = NOW + timedelta(hours=6)
+    glow.sync(store, bright, ["gas.consumption"], 395, later)
+    refresh_from = later - timedelta(days=glow.REFRESH_DAYS + 1)
+    for _, _, lo, hi in bright.readings_calls():
+        # Re-reads are only of chunks reaching back before the meter's history.
+        assert lo < start + timedelta(days=glow.CHUNK_DAYS) or lo >= refresh_from
 
 
 def test_gap_rereads_are_capped_per_sync(tmp_path):
     store = Store(str(tmp_path / "w.db"))
-    # Every other day missing across ~6 months: lots of incomplete chunks.
     start = NOW - timedelta(days=180)
     holes = [(start + timedelta(days=d), start + timedelta(days=d + 1)) for d in range(0, 175, 2)]
     bright = FakeBright(history_from=start, holes=holes)
     glow.sync(store, bright, ["gas.consumption"], 395, NOW)
     bright.calls.clear()
     glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
-    rereads = len(bright.readings_calls())
-    assert rereads <= 1 + glow.EMPTY_CHUNKS_TO_STOP + glow.GAP_CHUNKS_PER_SYNC
+    assert len(bright.readings_calls()) <= 1 + glow.GAP_CHUNKS_PER_SYNC
 
 
 def test_rereads_rotate_through_every_incomplete_chunk(tmp_path):
@@ -303,15 +315,29 @@ def test_old_holes_that_never_fill_are_given_up(tmp_path):
     hole = (NOW - timedelta(days=100), NOW - timedelta(days=99))      # meter offline that day
     bright = FakeBright(history_from=NOW - timedelta(days=120), holes=[hole])
     t = NOW
-    for _ in range(glow.GAP_MAX_TRIES + 3):
+    for _ in range(80):                                               # ~20 days of 6-hourly syncs
+        bright.now = t
         glow.sync(store, bright, ["gas.consumption"], 395, t)
         t += timedelta(hours=6)
+    bright.now = t
     tried = store.energy_chunks("gas.consumption")
     assert max(f for f, _ in tried.values()) == glow.GAP_MAX_TRIES     # stopped asking
     bright.calls.clear()
     glow.sync(store, bright, ["gas.consumption"], 395, t)
-    assert len(bright.readings_calls()) <= 3
+    assert len(bright.readings_calls()) == 1                           # just the refresh
     assert missing(store, t) == 48                                     # still reported, honestly
+
+
+def test_last_winter_is_recovered_past_an_empty_summer(tmp_path):
+    """The live case: Bright has gas from October 2025, nothing June-August 2026."""
+    store = Store(str(tmp_path / "w.db"))
+    summer = (datetime(2026, 6, 1, tzinfo=timezone.utc), datetime(2026, 9, 1, tzinfo=timezone.utc))
+    bright = FakeBright(history_from=datetime(2025, 10, 1, tzinfo=timezone.utc), holes=[summer])
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    first, _ = store.energy_range("gas.consumption")
+    assert first[:7] == "2025-10"
+    jan = store.energy_count("gas.consumption", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z")
+    assert jan == 31 * 48                                              # last winter, complete
 
 
 def test_missing_metric_is_published(tmp_path, fresh_state, monkeypatch):
@@ -321,3 +347,57 @@ def test_missing_metric_is_published(tmp_path, fresh_state, monkeypatch):
                         holes=[(NOW - timedelta(days=20), NOW - timedelta(days=19))])
     main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
     assert main.STATE["glow_missing"] == {"gas.consumption": 48, "electricity.consumption": 48}
+
+
+# ------------------------------------------------------------------ retries and logging
+
+def _urlopen_sequence(monkeypatch, outcomes):
+    """Make urlopen raise or answer from a list, one item per call."""
+    import io, json as _json, urllib.error
+    calls = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    def fake(req, timeout=None):
+        calls.append(req.full_url)
+        item = outcomes.pop(0)
+        if isinstance(item, int):
+            raise urllib.error.HTTPError(req.full_url, item, "x", {}, None)
+        if isinstance(item, Exception):
+            raise item
+        return Resp(_json.dumps(item).encode())
+    monkeypatch.setattr(glow.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(glow, "RETRY_AFTER_SECONDS", 0)
+    return calls
+
+
+def test_dropped_connection_is_retried_once(monkeypatch):
+    from http.client import RemoteDisconnected
+    calls = _urlopen_sequence(monkeypatch, [RemoteDisconnected("gone"), {"units": "kWh", "data": []}])
+    assert glow.Glow("u", "p").readings("tok", "rid", NOW - timedelta(days=1), NOW) == ("kWh", [])
+    assert len(calls) == 2
+
+
+def test_server_errors_retry_but_bad_requests_do_not(monkeypatch):
+    calls = _urlopen_sequence(monkeypatch, [503, 503])
+    with pytest.raises(glow.GlowError, match="HTTP 503"):
+        glow.Glow("u", "p").readings("tok", "rid", NOW - timedelta(days=1), NOW)
+    assert len(calls) == 2
+    calls = _urlopen_sequence(monkeypatch, [400])
+    with pytest.raises(glow.GlowError, match="HTTP 400"):
+        glow.Glow("u", "p").readings("tok", "rid", NOW - timedelta(days=1), NOW)
+    assert len(calls) == 1
+
+
+def test_log_counts_new_readings_not_rereads(tmp_path, caplog):
+    import logging
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=20))
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="wiser.glow"):
+        result = glow.sync(store, bright, ["gas.consumption"], 395, NOW)   # same moment: nothing new
+    assert result == {"gas.consumption": 0}
+    assert "gas.consumption +0 new (" in caplog.text and "re-read)" in caplog.text
