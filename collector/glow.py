@@ -32,6 +32,18 @@ CHUNK_DAYS = 10            # the most the API accepts for half-hourly data
 REFRESH_DAYS = 3           # recent days re-read each sync: the DCC can deliver late
 EMPTY_CHUNKS_TO_STOP = 2   # back-fill stops after this many empty chunks in a row
 
+# Gap-filling: Bright fetches older history from the DCC bit by bit, so a
+# stretch read once with holes may be complete later. Each sync re-reads up to
+# GAP_CHUNKS_PER_SYNC incomplete 10-day chunks per meter, least recently tried
+# first. A chunk older than GAP_GIVE_UP_DAYS that is still incomplete after
+# GAP_MAX_TRIES reads is left alone: those half-hours were never recorded.
+GAP_CHUNKS_PER_SYNC = 6
+GAP_MAX_TRIES = 6
+GAP_GIVE_UP_DAYS = 45
+# Chunks sit on a fixed 10-day grid, so the bookkeeping refers to the same
+# stretch every time whatever day a sync runs.
+GRID_EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
 
 class GlowError(RuntimeError):
     pass
@@ -47,6 +59,19 @@ def _floor_half_hour(dt):
 
 def _parse(ts):
     return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _grid_floor(dt):
+    step = timedelta(days=CHUNK_DAYS)
+    return GRID_EPOCH + ((dt - GRID_EPOCH) // step) * step
+
+
+def _expected(lo, hi):
+    return max(0, int((hi - lo).total_seconds() // 1800))
 
 
 class Glow:
@@ -168,10 +193,56 @@ def sync(store, client, classifiers, history_days, now):
                 empties = 0 if n else empties + 1
                 cursor = lo
                 store.commit()
+
+        count += _fill_gaps(store, classifier, fetch, now, fetched)
         written[classifier] = count
 
     log.info("glow ok: %s", ", ".join("%s +%d" % (c, n) for c, n in written.items()))
     return written
+
+
+def _incomplete_chunks(store, classifier, now):
+    """[(chunk_lo, chunk_hi, missing)] for 10-day grid chunks between the oldest
+    stored reading and the refresh window that have holes."""
+    first, _ = store.energy_range(classifier)
+    if first is None:
+        return []
+    start = _floor_half_hour(_parse(first))
+    end = now - timedelta(days=REFRESH_DAYS)      # newer than this is re-read anyway
+    out, lo = [], _grid_floor(start)
+    while lo < end:
+        hi = lo + timedelta(days=CHUNK_DAYS)
+        a, b = max(lo, start), min(hi, end)
+        missing = _expected(a, b) - store.energy_count(classifier, _iso(a), _iso(b))
+        if missing > 0:
+            out.append((lo, hi, missing))
+        lo = hi
+    return out
+
+
+def _fill_gaps(store, classifier, fetch, now, fetched):
+    """Re-read up to GAP_CHUNKS_PER_SYNC incomplete chunks. Returns rows written."""
+    tried = store.energy_chunks(classifier)
+    candidates = []
+    for lo, hi, missing in _incomplete_chunks(store, classifier, now):
+        key = _iso(lo)
+        fetches, last = tried.get(key, (0, ""))
+        if fetches >= GAP_MAX_TRIES and hi < now - timedelta(days=GAP_GIVE_UP_DAYS):
+            continue                                  # never recorded; stop asking
+        candidates.append((last, lo, hi, key))
+    written = 0
+    for _, lo, hi, key in sorted(candidates)[:GAP_CHUNKS_PER_SYNC]:
+        written += fetch(lo, min(hi, now))
+        store.record_energy_chunk(classifier, key, fetched)
+        store.commit()
+    return written
+
+
+def missing_halfhours(store, classifiers, now):
+    """{classifier: half-hours missing between the oldest stored reading and the
+    refresh window}, for /metrics. Falls as gap-filling catches up."""
+    now = _floor_half_hour(now)
+    return {c: sum(m for _, _, m in _incomplete_chunks(store, c, now)) for c in classifiers}
 
 
 def latest_readings(store, classifiers):
