@@ -31,13 +31,15 @@ APPLICATION_ID = "b0f1b774-a586-4f72-9edd-27ead8aa7a8d"
 
 CHUNK_DAYS = 10            # the most the API accepts for half-hourly data
 REFRESH_DAYS = 3           # recent days re-read each sync: the DCC can deliver late
-EMPTY_CHUNKS_TO_STOP = 2   # back-fill stops after this many empty chunks in a row
 
-# Gap-filling: Bright fetches older history from the DCC bit by bit, so a
-# stretch read once with holes may be complete later. Each sync re-reads up to
-# GAP_CHUNKS_PER_SYNC incomplete 10-day chunks per meter, least recently tried
-# first. A chunk older than GAP_GIVE_UP_DAYS that is still incomplete after
-# GAP_MAX_TRIES reads is left alone: those half-hours were never recorded.
+# History: every 10-day chunk in the window is read at least once, however
+# many empty months sit in between. (The first version stopped walking back
+# after two empty chunks; on the live meter a missing July hid May and June.)
+# Bright also fetches history from the DCC bit by bit, so a chunk read with
+# holes may be complete later: each sync re-reads up to GAP_CHUNKS_PER_SYNC
+# incomplete chunks per meter, least recently tried (then newest) first. A chunk older than
+# GAP_GIVE_UP_DAYS still incomplete after GAP_MAX_TRIES reads is left alone:
+# those half-hours were never recorded.
 # One retry for a request that fails in a way that might pass: a dropped
 # connection, a timeout, HTTP 429 or a 5xx. Seen live on 2026-10-29, when
 # Bright's service was struggling. Other 4xx (bad login, bad request) fail at once.
@@ -157,10 +159,10 @@ def sync(store, client, classifiers, history_days, now):
        data that's one cheap request, not 40 a time.
     2. Refresh: re-read from REFRESH_DAYS before the newest stored reading up
        to now, because the DCC can deliver late or correct readings.
-    3. Back-fill: walk backwards from the oldest stored reading, a chunk at a
-       time, to `history_days` ago. Stops after EMPTY_CHUNKS_TO_STOP empty
-       chunks (the start of the meter's history, or what Bright has fetched
-       so far); the next sync tries again from there.
+    3. History: once the meter has any data, every 10-day chunk back to
+       `history_days` ago that isn't complete is read: all never-read chunks
+       straight away (a one-off of up to ~40 requests), then up to
+       GAP_CHUNKS_PER_SYNC re-reads of incomplete ones per sync.
     """
     fetched = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     now = _floor_half_hour(now)
@@ -196,24 +198,14 @@ def sync(store, client, classifiers, history_days, now):
                 lo = hi
         store.commit()
 
-        first, last = store.energy_range(classifier)
-        if first is not None:
-            cursor, empties = _parse(first), 0
-            while cursor > window_start and empties < EMPTY_CHUNKS_TO_STOP:
-                lo = max(cursor - timedelta(days=CHUNK_DAYS), window_start)
-                n = fetch(lo, cursor)
-                count += n
-                empties = 0 if n else empties + 1
-                cursor = lo
-                store.commit()
-
-        count += _fill_gaps(store, classifier, fetch, now, fetched)
+        if store.energy_range(classifier)[0] is not None:
+            count += _fill_history(store, classifier, fetch, window_start, now, fetched)
         new = _stored(store, classifier) - before
         written[classifier] = new
         reread[classifier] = count - new
 
     # "new" is what this sync added; "re-read" is readings fetched again and
-    # rewritten unchanged (the 3-day refresh and the gap re-reads).
+    # rewritten unchanged (the 3-day refresh and the history re-reads).
     log.info("glow ok: %s", ", ".join(
         "%s +%d new (%d re-read)" % (c, n, reread[c]) for c, n in written.items()))
     return written
@@ -224,14 +216,9 @@ def _stored(store, classifier):
         "SELECT COUNT(*) FROM energy_halfhourly WHERE classifier=?", (classifier,)).fetchone()[0]
 
 
-def _incomplete_chunks(store, classifier, now):
-    """[(chunk_lo, chunk_hi, missing)] for 10-day grid chunks between the oldest
-    stored reading and the refresh window that have holes."""
-    first, _ = store.energy_range(classifier)
-    if first is None:
-        return []
-    start = _floor_half_hour(_parse(first))
-    end = now - timedelta(days=REFRESH_DAYS)      # newer than this is re-read anyway
+def _incomplete_chunks(store, classifier, start, end):
+    """[(chunk_lo, chunk_hi, missing)] for 10-day grid chunks covering
+    [start, end) that have holes."""
     out, lo = [], _grid_floor(start)
     while lo < end:
         hi = lo + timedelta(days=CHUNK_DAYS)
@@ -243,19 +230,27 @@ def _incomplete_chunks(store, classifier, now):
     return out
 
 
-def _fill_gaps(store, classifier, fetch, now, fetched):
-    """Re-read up to GAP_CHUNKS_PER_SYNC incomplete chunks. Returns rows written."""
+def _fill_history(store, classifier, fetch, window_start, now, fetched):
+    """Read never-read incomplete chunks in the window, plus up to
+    GAP_CHUNKS_PER_SYNC re-reads of incomplete ones. Returns rows written."""
     tried = store.energy_chunks(classifier)
-    candidates = []
-    for lo, hi, missing in _incomplete_chunks(store, classifier, now):
+    end = now - timedelta(days=REFRESH_DAYS)      # newer than this is refreshed anyway
+    fresh, retries = [], []
+    for lo, hi, _ in _incomplete_chunks(store, classifier, window_start, end):
         key = _iso(lo)
         fetches, last = tried.get(key, (0, ""))
-        if fetches >= GAP_MAX_TRIES and hi < now - timedelta(days=GAP_GIVE_UP_DAYS):
-            continue                                  # never recorded; stop asking
-        candidates.append((last, lo, hi, key))
+        if fetches == 0:
+            fresh.append((lo, hi, key))
+        elif fetches < GAP_MAX_TRIES or hi >= now - timedelta(days=GAP_GIVE_UP_DAYS):
+            retries.append((last, lo, hi, key))
+        # else: old and still incomplete after GAP_MAX_TRIES reads; never recorded
+    # Least recently tried first; among equals, newest first, because Bright
+    # fills history backwards from today, so recent holes are likeliest to fill.
+    retries.sort(key=lambda r: (r[0], -r[1].timestamp()))
+    todo = fresh + [(lo, hi, key) for _, lo, hi, key in retries[:GAP_CHUNKS_PER_SYNC]]
     written = 0
-    for _, lo, hi, key in sorted(candidates)[:GAP_CHUNKS_PER_SYNC]:
-        written += fetch(lo, min(hi, now))
+    for lo, hi, key in todo:
+        written += fetch(max(lo, window_start), min(hi, now))
         store.record_energy_chunk(classifier, key, fetched)
         store.commit()
     return written
@@ -265,7 +260,15 @@ def missing_halfhours(store, classifiers, now):
     """{classifier: half-hours missing between the oldest stored reading and the
     refresh window}, for /metrics. Falls as gap-filling catches up."""
     now = _floor_half_hour(now)
-    return {c: sum(m for _, _, m in _incomplete_chunks(store, c, now)) for c in classifiers}
+    out = {}
+    for c in classifiers:
+        first, _ = store.energy_range(c)
+        if first is None:
+            out[c] = 0
+            continue
+        start = _floor_half_hour(_parse(first))
+        out[c] = sum(m for _, _, m in _incomplete_chunks(store, c, start, now - timedelta(days=REFRESH_DAYS)))
+    return out
 
 
 def latest_readings(store, classifiers):
