@@ -44,6 +44,12 @@ REFRESH_DAYS = 3           # recent days re-read each sync: the DCC can deliver 
 # connection, a timeout, HTTP 429 or a 5xx. Seen live on 2026-10-29, when
 # Bright's service was struggling. Other 4xx (bad login, bad request) fail at once.
 RETRY_AFTER_SECONDS = 5
+# History reads are spaced out and isolated: on 2026-10-29 Bright's service was
+# struggling and a single dropped connection ended the whole sync. A chunk that
+# fails is skipped (and not counted as a try); three failures in a row end the
+# history part of this sync, because the service is clearly down.
+HISTORY_PAUSE_SECONDS = 1
+HISTORY_FAILURES_TO_STOP = 3
 GAP_CHUNKS_PER_SYNC = 6
 GAP_MAX_TRIES = 6
 GAP_GIVE_UP_DAYS = 45
@@ -176,7 +182,7 @@ def sync(store, client, classifiers, history_days, now):
         if c not in available:
             log.warning("glow account has no %s resource; skipping it", c)
 
-    written, reread = {}, {}
+    written, reread, history = {}, {}, {}
     for classifier in wanted:
         rid = available[classifier]
         client.catchup(token, rid)
@@ -199,7 +205,9 @@ def sync(store, client, classifiers, history_days, now):
         store.commit()
 
         if store.energy_range(classifier)[0] is not None:
-            count += _fill_history(store, classifier, fetch, window_start, now, fetched)
+            n, read, failed, todo = _fill_history(store, classifier, fetch, window_start, now, fetched)
+            count += n
+            history[classifier] = (read, failed, todo)
         new = _stored(store, classifier) - before
         written[classifier] = new
         reread[classifier] = count - new
@@ -208,6 +216,9 @@ def sync(store, client, classifiers, history_days, now):
     # rewritten unchanged (the 3-day refresh and the history re-reads).
     log.info("glow ok: %s", ", ".join(
         "%s +%d new (%d re-read)" % (c, n, reread[c]) for c, n in written.items()))
+    for c, (read, failed, todo) in history.items():
+        if todo:
+            log.info("glow %s history: %d of %d chunks read, %d failed", c, read, todo, failed)
     return written
 
 
@@ -248,12 +259,27 @@ def _fill_history(store, classifier, fetch, window_start, now, fetched):
     # fills history backwards from today, so recent holes are likeliest to fill.
     retries.sort(key=lambda r: (r[0], -r[1].timestamp()))
     todo = fresh + [(lo, hi, key) for _, lo, hi, key in retries[:GAP_CHUNKS_PER_SYNC]]
-    written = 0
-    for lo, hi, key in todo:
-        written += fetch(max(lo, window_start), min(hi, now))
+    written = read = failed = in_a_row = 0
+    for i, (lo, hi, key) in enumerate(todo):
+        if i:
+            time.sleep(HISTORY_PAUSE_SECONDS)
+        try:
+            written += fetch(max(lo, window_start), min(hi, now))
+        except GlowError as exc:
+            failed += 1
+            in_a_row += 1
+            log.warning("glow %s: history chunk from %s failed (%s); will try again next sync",
+                        classifier, key[:10], exc)
+            if in_a_row >= HISTORY_FAILURES_TO_STOP:
+                log.warning("glow %s: %d failures in a row; leaving the rest of the history "
+                            "until the next sync", classifier, in_a_row)
+                break
+            continue
+        in_a_row = 0
+        read += 1
         store.record_energy_chunk(classifier, key, fetched)
         store.commit()
-    return written
+    return written, read, failed, len(todo)
 
 
 def missing_halfhours(store, classifiers, now):
