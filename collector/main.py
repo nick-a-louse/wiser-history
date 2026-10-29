@@ -18,7 +18,7 @@ from datetime import timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .config import Config, ConfigError
-from .glow import Glow, GlowError, latest_readings as glow_latest, sync as glow_sync
+from .glow import Glow, GlowError, latest_readings as glow_latest, missing_halfhours as glow_missing, sync as glow_sync
 from .hub import Hub, HubError, geo_position, parse
 from .openmeteo import OpenMeteo, OpenMeteoError, sync as openmeteo_sync
 from .publish import S3Publisher, backup_db, generate
@@ -39,7 +39,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("wiser")
 
 # Release number; the image build adds its git commit (APP_VERSION, e.g. "sha-7eec055...").
-RELEASE = "1.3.0"
+RELEASE = "1.3.1"
 _build = os.environ.get("APP_VERSION", "").strip()
 VERSION = RELEASE if not _build or _build.lstrip("v") == RELEASE else "%s (%s)" % (RELEASE, _build[:11])
 
@@ -55,6 +55,7 @@ STATE = {
     "glow_last_success_epoch": 0.0,
     "glow_next_epoch": 0.0,
     "glow_latest": {},                # {classifier: unix time of newest stored half-hour}
+    "glow_missing": {},               # {classifier: half-hours missing inside the stored range}
     "cycles": 0,
     "failures": 0,
 }
@@ -130,6 +131,11 @@ class MetricsHandler(BaseHTTPRequestHandler):
             ) % (STATE["last_glow_ok"], STATE["glow_last_success_epoch"])
             for classifier, ts in sorted(STATE["glow_latest"].items()):
                 body += 'wiser_glow_latest_reading_timestamp_seconds{classifier="%s"} %.0f\n' % (classifier, ts)
+            if STATE["glow_missing"]:
+                body += ("# HELP wiser_glow_missing_halfhours Half-hours missing between the oldest stored reading and the last 3 days, per meter.\n"
+                         "# TYPE wiser_glow_missing_halfhours gauge\n")
+                for classifier, n in sorted(STATE["glow_missing"].items()):
+                    body += 'wiser_glow_missing_halfhours{classifier="%s"} %d\n' % (classifier, n)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4")
@@ -200,6 +206,7 @@ def run_glow(cfg, store, client, now):
         STATE["glow_next_epoch"] = time.time() + GLOW_RETRY_SECONDS
     try:
         STATE["glow_latest"] = glow_latest(store, cfg.glow_classifiers)
+        STATE["glow_missing"] = glow_missing(store, cfg.glow_classifiers, now)
     except Exception:
         log.exception("couldn't read the newest smart-meter readings")
     return ok, error

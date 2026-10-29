@@ -23,8 +23,9 @@ class FakeBright:
     """Meter data exists from `history_from` to `lag` before now."""
 
     def __init__(self, history_from=None, lag=timedelta(hours=2), resources=CLASSIFIERS,
-                 fail_login=False):
+                 fail_login=False, holes=()):
         self.history_from = history_from
+        self.holes = list(holes)          # [(start, end)] Bright doesn't have (yet)
         self.lag = lag
         self.available = {c: "id-" + c for c in resources}
         self.fail_login = fail_login
@@ -48,7 +49,8 @@ class FakeBright:
             raise glow.GlowError("glow resource: HTTP 400")       # like the real API at 31 days
         rows, t = [], start
         while t < end:
-            has = self.history_from is not None and self.history_from <= t <= NOW - self.lag
+            has = (self.history_from is not None and self.history_from <= t <= NOW - self.lag
+                   and not any(a <= t < b for a, b in self.holes))
             value = (0.0 if t.hour < 5 else 1.25) if has else None   # genuine zeros overnight
             rows.append((t.strftime("%Y-%m-%dT%H:%M:%SZ"), value))
             t += timedelta(minutes=30)
@@ -237,3 +239,85 @@ def test_owm_error_names_the_http_status(monkeypatch):
 def test_new_database_has_glow_column(tmp_path):
     store = Store(str(tmp_path / "w.db"))
     assert "glow_ok" in {r[1] for r in store.conn.execute("PRAGMA table_info(run_log)")}
+
+
+# ------------------------------------------------------------------ gap-filling
+
+def missing(store, now=NOW):
+    return glow.missing_halfhours(store, ["gas.consumption"], now)["gas.consumption"]
+
+
+def test_holes_filled_once_bright_has_them(tmp_path):
+    """The bug seen live on 2026-10-29: history read once with holes stayed holed."""
+    store = Store(str(tmp_path / "w.db"))
+    hole = (NOW - timedelta(days=40), NOW - timedelta(days=25))
+    bright = FakeBright(history_from=NOW - timedelta(days=60), holes=[hole])
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    assert missing(store) == 15 * 48                     # 15 days absent, and known to be absent
+
+    bright.holes = []                                    # Bright fetches them from the DCC later
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
+    assert missing(store, NOW + timedelta(hours=6)) == 0
+
+
+def test_complete_chunks_are_never_reread(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=60))
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    bright.calls.clear()
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
+    # refresh + 2 empty probes below the oldest reading; no gap re-reads
+    assert len(bright.readings_calls()) <= 3
+
+
+def test_gap_rereads_are_capped_per_sync(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    # Every other day missing across ~6 months: lots of incomplete chunks.
+    start = NOW - timedelta(days=180)
+    holes = [(start + timedelta(days=d), start + timedelta(days=d + 1)) for d in range(0, 175, 2)]
+    bright = FakeBright(history_from=start, holes=holes)
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW)
+    bright.calls.clear()
+    glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
+    rereads = len(bright.readings_calls())
+    assert rereads <= 1 + glow.EMPTY_CHUNKS_TO_STOP + glow.GAP_CHUNKS_PER_SYNC
+
+
+def test_rereads_rotate_through_every_incomplete_chunk(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    start = NOW - timedelta(days=180)
+    holes = [(start + timedelta(days=d), start + timedelta(days=d + 1)) for d in range(0, 175, 2)]
+    bright = FakeBright(history_from=start, holes=holes)
+    t = NOW
+    glow.sync(store, bright, ["gas.consumption"], 395, t)
+    before = missing(store, t)
+    bright.holes = []
+    for _ in range(4):                                   # ~18 incomplete chunks, 6 per sync
+        t += timedelta(hours=6)
+        glow.sync(store, bright, ["gas.consumption"], 395, t)
+    assert before > 0 and missing(store, t) == 0
+
+
+def test_old_holes_that_never_fill_are_given_up(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    hole = (NOW - timedelta(days=100), NOW - timedelta(days=99))      # meter offline that day
+    bright = FakeBright(history_from=NOW - timedelta(days=120), holes=[hole])
+    t = NOW
+    for _ in range(glow.GAP_MAX_TRIES + 3):
+        glow.sync(store, bright, ["gas.consumption"], 395, t)
+        t += timedelta(hours=6)
+    tried = store.energy_chunks("gas.consumption")
+    assert max(f for f, _ in tried.values()) == glow.GAP_MAX_TRIES     # stopped asking
+    bright.calls.clear()
+    glow.sync(store, bright, ["gas.consumption"], 395, t)
+    assert len(bright.readings_calls()) <= 3
+    assert missing(store, t) == 48                                     # still reported, honestly
+
+
+def test_missing_metric_is_published(tmp_path, fresh_state, monkeypatch):
+    monkeypatch.setattr(main, "utcnow", lambda: NOW)
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=30),
+                        holes=[(NOW - timedelta(days=20), NOW - timedelta(days=19))])
+    main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
+    assert main.STATE["glow_missing"] == {"gas.consumption": 48, "electricity.consumption": 48}

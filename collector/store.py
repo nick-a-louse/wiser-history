@@ -148,6 +148,18 @@ CREATE TABLE IF NOT EXISTS energy_halfhourly (
     PRIMARY KEY (ts_utc, classifier)
 );
 
+-- Bookkeeping for re-reading incomplete stretches of energy history. Bright
+-- fetches older readings from the DCC bit by bit, so a 10-day stretch that
+-- came back with holes may be complete a day later. One row per classifier
+-- per fixed 10-day chunk that has been re-read.
+CREATE TABLE IF NOT EXISTS energy_chunk (
+    classifier        TEXT NOT NULL,
+    chunk_start       TEXT NOT NULL,
+    fetches           INTEGER NOT NULL,
+    last_fetched_utc  TEXT NOT NULL,
+    PRIMARY KEY (classifier, chunk_start)
+);
+
 CREATE TABLE IF NOT EXISTS run_log (
     ts_utc      TEXT PRIMARY KEY,
     hub_ok      INTEGER NOT NULL,
@@ -315,6 +327,28 @@ class Store:
             (classifier,),
         ).fetchone()
         return row[0], row[1]
+
+    def energy_count(self, classifier, start_ts, end_ts):
+        """Stored half-hours in [start_ts, end_ts)."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM energy_halfhourly WHERE classifier=? AND ts_utc >= ? AND ts_utc < ?",
+            (classifier, start_ts, end_ts),
+        ).fetchone()[0]
+
+    def energy_chunks(self, classifier):
+        """{chunk_start: (fetches, last_fetched_utc)} for chunks re-read so far."""
+        return {r[0]: (r[1], r[2]) for r in self.conn.execute(
+            "SELECT chunk_start, fetches, last_fetched_utc FROM energy_chunk WHERE classifier=?",
+            (classifier,),
+        )}
+
+    def record_energy_chunk(self, classifier, chunk_start, fetched_ts):
+        self.conn.execute(
+            "INSERT INTO energy_chunk (classifier, chunk_start, fetches, last_fetched_utc)"
+            " VALUES (?,?,1,?) ON CONFLICT(classifier, chunk_start)"
+            " DO UPDATE SET fetches = fetches + 1, last_fetched_utc = excluded.last_fetched_utc",
+            (classifier, chunk_start, fetched_ts),
+        )
 
     def first_archive_gap_day(self, start_day, end_day):
         """The earliest day in [start_day, end_day] (YYYY-MM-DD) without a

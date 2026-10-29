@@ -160,6 +160,11 @@ works whoever the supplier is. The collector stores half-hourly `gas.consumption
   syncs, every 6 hours, re-read the last 3 days (the meter network can deliver late) and keep
   probing a little further back in case Bright has fetched more history.
 - Until Bright has any data, each sync costs one request per meter.
+- **Gap-filling:** Bright fetches older history from the meter network bit by bit, so a stretch
+  read with holes may be complete a day later. Each sync re-reads up to 6 incomplete 10-day
+  stretches per meter, least recently tried first. A stretch older than 45 days that is still
+  incomplete after 6 reads is left alone (those half-hours were never recorded), but still
+  counted in `wiser_glow_missing_halfhours`.
 
 Gas turns boiler hours into energy; with a combi boiler it also includes hot water. Electricity
 shows any electric heaters used alongside the radiators. A failed sync never affects the hub
@@ -191,8 +196,8 @@ last success, and both cadences.
 exceeds ~1800), `wiser_hub_up`, `wiser_weather_up`, `wiser_publish_up`,
 `wiser_openmeteo_up`, `wiser_openmeteo_last_success_timestamp_seconds`, `wiser_glow_up`,
 `wiser_glow_last_success_timestamp_seconds`,
-`wiser_glow_latest_reading_timestamp_seconds{classifier="…"}` (only when the smart meter is
-set up), `wiser_cycles_total` and `wiser_failures_total`. Grafana also alerts on the weather
+`wiser_glow_latest_reading_timestamp_seconds{classifier="…"}` and
+`wiser_glow_missing_halfhours{classifier="…"}` (only when the smart meter is set up), `wiser_cycles_total` and `wiser_failures_total`. Grafana also alerts on the weather
 API and the S3 publish failing, and on the Open-Meteo sync going 12 hours without a success.
 
 `/healthz` on the collector returns 503 once the last success is over 30 minutes old,
