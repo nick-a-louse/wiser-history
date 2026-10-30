@@ -80,9 +80,9 @@ def test_held_out_months_are_never_seen_in_training(demo, monkeypatch):
     seen = []
     real = sg.fit
 
-    def spy(train, hourly_, model, robust=True):
+    def spy(train, hourly_, model, robust=True, **kw):
         seen.append(set(train["month"]))
-        return real(train, hourly_, model, robust)
+        return real(train, hourly_, model, robust, **kw)
     monkeypatch.setattr(sg, "fit", spy)
     overall, by_month, pred = sg.leave_one_month_out(daily, hourly, "hdd_15_5")
     for held_out, months_trained in zip(by_month.index, seen):
@@ -105,3 +105,65 @@ def test_committed_notebooks_carry_no_outputs():
             if cell["cell_type"] == "code":
                 assert not cell.get("outputs"), name
                 assert cell.get("execution_count") is None, name
+
+
+def test_results_page_is_written(tmp_path, demo):
+    from wiser_ml import report
+    daily, hourly = demo
+    page = report.write_results_page(daily, hourly, tmp_path, "October 2026", "MADE-UP DEMO DATA")
+    text = page.read_text()
+    for heading in ("## The energy signature", "## How well the models predict",
+                    "## What the model learned", "## The days the model got most wrong", "## Caveats"):
+        assert heading in text
+    for img in ("signature", "balance", "predicted_vs_actual", "residuals"):
+        assert (tmp_path / "img" / "01_energy_signature" / (img + ".png")).stat().st_size > 1000
+    assert "[glossary](../GLOSSARY.md)" in text
+    # every table row has the same number of cells as its header
+    for block in text.split("\n\n"):
+        rows = [l for l in block.splitlines() if l.startswith("|")]
+        if rows:
+            assert len({r.count("|") for r in rows}) == 1, rows[0]
+
+
+def test_glossary_covers_the_terms_used():
+    glossary = open(os.path.join(HERE, "..", "analysis", "GLOSSARY.md")).read()
+    for term in ("Balance temperature", "Degree-day", "Base load", "Heat-loss coefficient",
+                 "Residual", "MAE", "CV(RMSE)", "NMBE", "Confidence interval", "HAC",
+                 "Leave-one-month-out", "Baseline model", "Grid search"):
+        assert "**%s" % term in glossary, term
+
+
+def test_away_days_file_and_no_gas_days_are_left_out(tmp_path, demo):
+    f = tmp_path / "away_days.txt"
+    f.write_text("# holidays\n2025-12-27 to 2025-12-29\n\n2026-02-14  # weekend away\n")
+    days = data.read_away_days(str(f))
+    assert len(days) == 4 and min(days).isoformat() == "2025-12-27"
+    with pytest.raises(ValueError):
+        f.write_text("27/12/2025\n")
+        data.read_away_days(str(f))
+
+    daily, hourly = demo
+    daily = daily.copy()
+    day = daily[daily.gas_kwh.notna()].index[10]
+    daily.loc[day, "gas_kwh"] = 0.1                      # nobody home: no hot water at all
+    daily["away"] = daily["gas_kwh"] < data.AWAY_BELOW_KWH
+    assert day not in data.home_days(daily).index
+    overall, _, pred = sg.leave_one_month_out(daily, hourly, "hdd_15_5")
+    assert day not in pred.index
+
+
+def test_hot_water_can_be_fixed_at_its_measured_level(demo):
+    daily, hourly = demo
+    f = sg.fit(daily, hourly, "full", hot_water=6.0)     # the made-up house's true base load
+    assert "const" not in f.params.index and f.base_load == 6.0
+    assert f.params["hdd"] == pytest.approx(5.2, abs=0.4)
+    assert (f.predict(daily, hourly) >= 6.0).all()        # never below hot water
+
+
+def test_hot_water_is_measured_from_warm_days_with_the_heating_off():
+    idx = pd.date_range("2026-06-01", periods=20, freq="D")
+    daily = pd.DataFrame({"gas_kwh": [3.0] * 10 + [4.0] * 9 + [0.1], "temp_mean_c": 18.0}, index=idx)
+    daily["away"] = daily["gas_kwh"] < data.AWAY_BELOW_KWH
+    hw = data.hot_water_kwh(daily)
+    assert hw["days"] == 19 and hw["kwh"] == 3.0          # median of ten 3s and nine 4s; away day out
+    assert data.hot_water_kwh(daily.iloc[:3]) is None     # too few days to say

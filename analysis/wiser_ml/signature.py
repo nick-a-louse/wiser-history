@@ -17,6 +17,13 @@ Four models, simplest first, so each extra piece has to earn its place:
     hdd_15_5      degree-days at the UK's conventional 15.5 C base
     changepoint   degree-days at the best-fitting balance temperature
     full          changepoint + wind x degree-days + sun + weekend
+
+Hot water can be fixed at its measured level (data.hot_water_kwh: median gas
+on warm days with the heating off) instead of learned. On the real data
+(2026-10-30) the learned intercept wasn't hot water at all: it came out at
+8-14 kWh/day, against 3.5 measured, because few heating-season days sit near
+the balance point. Fixing it gave the best held-out score and left the
+weather effects unchanged. Days away (no gas) are left out of training.
 """
 from dataclasses import dataclass, field
 
@@ -24,7 +31,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-from .data import degree_days
+from .data import degree_days, home_days
 
 BALANCE_GRID = np.arange(10.0, 20.01, 0.25)
 MODELS = ("mean", "hdd_15_5", "changepoint", "full")
@@ -52,6 +59,13 @@ class Fit:
     base_c: float
     result: object              # statsmodels results
     sse_by_base: dict = field(default_factory=dict)
+    hot_water: float = None     # fixed base load (kWh/day), or None if learned
+
+    @property
+    def base_load(self):
+        if self.hot_water is not None:
+            return self.hot_water
+        return max(float(self.result.params["const"]), 0.0)
 
     def predict(self, daily, hourly):
         """Predicted gas per day, never below the fitted base load. The linear
@@ -62,7 +76,9 @@ class Fit:
         term by heating need instead was physically worse (base load < 0)."""
         X = design(daily, hourly, self.base_c, self.model)
         raw = self.result.predict(X[self.result.model.exog_names])
-        return raw.clip(lower=max(float(self.params["const"]), 0.0))
+        if self.hot_water is not None:
+            raw = raw + self.hot_water
+        return raw.clip(lower=self.base_load)
 
     @property
     def params(self):
@@ -76,21 +92,28 @@ def _ols(y, X, robust):
     return model.fit(cov_type="HAC", cov_kwds={"maxlags": 3}) if robust else model.fit()
 
 
-def fit(daily, hourly, model, robust=True):
-    """Fit one model on the days that have gas data."""
+def fit(daily, hourly, model, robust=True, hot_water=None):
+    """Fit one model on days with gas data when someone was home. With
+    `hot_water` (kWh/day), the base load is fixed at that value and only the
+    weather and weekend effects are learned (no intercept)."""
     if model not in MODELS:
         raise ValueError("unknown model %r" % model)
-    days = daily[daily["gas_kwh"].notna()]
-    y = days["gas_kwh"]
+    fixed = hot_water if model != "mean" else None
+    days = home_days(daily)
+    y = days["gas_kwh"] - (fixed or 0.0)
+
+    def X_for(base):
+        X = design(days, hourly, base, model)
+        return X.drop(columns="const") if fixed is not None else X
+
     if model in ("mean", "hdd_15_5"):
-        base = 15.5
-        return Fit(model, base, _ols(y, design(days, hourly, base, model), robust))
+        return Fit(model, 15.5, _ols(y, X_for(15.5), robust), hot_water=fixed)
     sse = {}
     for base in BALANCE_GRID:
-        X = design(days, hourly, base, model).dropna()
+        X = X_for(base).dropna()
         sse[float(base)] = float(sm.OLS(y.loc[X.index], X).fit().ssr)
     best = min(sse, key=sse.get)
-    return Fit(model, best, _ols(y, design(days, hourly, best, model), robust), sse)
+    return Fit(model, best, _ols(y, X_for(best), robust), sse, hot_water=fixed)
 
 
 def metrics(actual, predicted):
@@ -110,17 +133,17 @@ def metrics(actual, predicted):
     }
 
 
-def leave_one_month_out(daily, hourly, model, min_days=5):
+def leave_one_month_out(daily, hourly, model, min_days=5, hot_water=None):
     """Hold out each month in turn, fit on the rest, predict the held-out
     month. Random splits would leak: neighbouring days are near-copies of each
     other (same weather spell), so the model would be tested on what it has
     effectively already seen."""
-    days = daily[daily["gas_kwh"].notna()]
+    days = home_days(daily)
     months = [m for m, n in days.groupby("month").size().items() if n >= min_days]
     preds = []
     for m in months:
         train, test = days[days["month"] != m], days[days["month"] == m]
-        f = fit(train, hourly, model, robust=False)
+        f = fit(train, hourly, model, robust=False, hot_water=hot_water)
         preds.append(f.predict(test, hourly).rename("predicted").to_frame().assign(month=m))
     pred = pd.concat(preds)
     pred["actual"] = days.loc[pred.index, "gas_kwh"]
@@ -128,11 +151,11 @@ def leave_one_month_out(daily, hourly, model, min_days=5):
     return metrics(pred["actual"], pred["predicted"]), by_month, pred
 
 
-def compare(daily, hourly, models=MODELS):
+def compare(daily, hourly, models=MODELS, hot_water=None):
     """Leave-one-month-out scores for each model, side by side."""
     rows = {}
     for m in models:
-        overall, _, _ = leave_one_month_out(daily, hourly, m)
+        overall, _, _ = leave_one_month_out(daily, hourly, m, hot_water=hot_water)
         rows[m] = overall
     return pd.DataFrame(rows).T
 

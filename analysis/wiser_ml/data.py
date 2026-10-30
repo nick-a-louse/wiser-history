@@ -14,7 +14,13 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
+import re
+from datetime import date, timedelta
+
 GAS = "gas.consumption"
+# A day with almost no gas (no hot water at all) means nobody was home: the
+# model is about normal days at home, so such days are left out of training.
+AWAY_BELOW_KWH = 0.5
 ELECTRICITY = "electricity.consumption"
 
 
@@ -77,8 +83,28 @@ def daily_weather(hourly):
     return out[out["hours"] >= 22].drop(columns="hours")
 
 
-def load_daily(db_path):
-    """Daily energy joined to daily weather, plus calendar columns.
+def read_away_days(path):
+    """Dates away from home, one per line: "2026-08-01" or
+    "2026-08-01 to 2026-08-14". Blank lines and # comments are ignored."""
+    days = set()
+    for raw in open(path, encoding="utf-8"):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?:\s*(?:to|-)\s*(\d{4}-\d{2}-\d{2}))?", line)
+        if not m:
+            raise ValueError("can't read away day %r (use YYYY-MM-DD or YYYY-MM-DD to YYYY-MM-DD)" % line)
+        start = date.fromisoformat(m.group(1))
+        end = date.fromisoformat(m.group(2) or m.group(1))
+        while start <= end:
+            days.add(start)
+            start += timedelta(days=1)
+    return days
+
+
+def load_daily(db_path, away_days_path=None):
+    """Daily energy joined to daily weather, plus calendar columns and an
+    `away` flag (almost no gas, or listed in the away-days file).
     Returns (daily, hourly_weather): the hourly table is kept so degree-days
     can be recomputed at any base temperature."""
     conn = connect(db_path)
@@ -91,7 +117,30 @@ def load_daily(db_path):
     daily = weather.join(energy, how="left")
     daily["weekend"] = (daily.index.dayofweek >= 5).astype(int)
     daily["month"] = daily.index.to_period("M").astype(str)
+    listed = read_away_days(away_days_path) if away_days_path else set()
+    daily["away"] = (daily["gas_kwh"] < AWAY_BELOW_KWH) | daily.index.to_series().dt.date.isin(listed)
     return daily, hourly
+
+
+def home_days(daily):
+    """Days that can teach the model: complete gas data and someone home."""
+    keep = daily["gas_kwh"].notna()
+    if "away" in daily:
+        keep &= ~daily["away"].astype(bool)
+    return daily[keep]
+
+
+def hot_water_kwh(daily, min_days=5):
+    """Measured base load: median gas on warm days with the heating off (May to
+    September, daily mean 15 C or more, someone home). With a combi boiler this
+    is hot water (and the hob, if gas). Returns a dict, or None if too few days."""
+    warm = home_days(daily)
+    warm = warm[warm.index.month.isin([5, 6, 7, 8, 9]) & (warm["temp_mean_c"] >= 15)]
+    if len(warm) < min_days:
+        return None
+    g = warm["gas_kwh"]
+    return {"kwh": float(g.median()), "days": int(len(g)),
+            "low": float(g.quantile(0.25)), "high": float(g.quantile(0.75))}
 
 
 def heating_season(daily, months=(10, 11, 12, 1, 2, 3, 4)):
@@ -130,6 +179,7 @@ def demo_daily(days=240, seed=3):
     daily.loc[rng.random(days) < 0.3, ["gas_kwh", "elec_kwh"]] = np.nan
     daily["weekend"] = (daily.index.dayofweek >= 5).astype(int)
     daily["month"] = daily.index.to_period("M").astype(str)
+    daily["away"] = daily["gas_kwh"] < AWAY_BELOW_KWH
     # Synthetic hourly temperatures for degree-day calculations.
     hours = pd.date_range(idx[0], periods=days * 24, freq="h")
     hourly_t = np.repeat(temp, 24) + 3.0 * np.sin((hours.hour - 9) / 24 * 2 * np.pi)
