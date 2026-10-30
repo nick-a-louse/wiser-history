@@ -1,0 +1,6 @@
+# For running the analysis notebooks (not part of the collector image).
+pandas>=2.2
+numpy>=1.26
+statsmodels>=0.14
+matplotlib>=3.8
+jupyterlab>=4

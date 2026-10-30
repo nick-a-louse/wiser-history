@@ -262,6 +262,7 @@ web/Dockerfile         vendors ECharts at build time (no CDN at runtime), stamps
 
 docker-compose.yml     what runs on the server (/srv/wiser)
 scripts/               demo_data.py, make_icons.py
+analysis/              ML notebooks + wiser_ml package (TECH-98); runs on a copy of the DB, not in the images
 tests/                 pytest
 ```
 
