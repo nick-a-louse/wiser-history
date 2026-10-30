@@ -162,8 +162,11 @@ works whoever the supplier is. The collector stores half-hourly `gas.consumption
 - Until Bright has any data, each sync costs one request per meter.
 - A request that fails in a way that might pass (dropped connection, timeout, HTTP 429 or 5xx)
   is retried once after 5 seconds; other errors fail straight away. History requests are spaced 1 second
-  apart; one that still fails is skipped and tried again next sync, and three failures in a
-  row leave the rest of the history for the next sync. The log line reports new
+  apart; one that still fails is skipped and counts as one of its tries (so stretches that
+  always time out can't block the ones after them), and three failures in a row leave the
+  rest of that meter's history for the next sync. One meter failing doesn't stop the other.
+- The sync runs on its own background thread with its own database connection, so the
+  5-minute hub poll never waits for Bright, however slow it is. The log line reports new
   readings separately from ones re-read and rewritten unchanged.
 - **Gap-filling:** Bright fetches older history from the meter network bit by bit, so a stretch
   read with holes may be complete a day later. Each sync re-reads up to 6 incomplete 10-day

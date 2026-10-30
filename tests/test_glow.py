@@ -184,21 +184,28 @@ class Cfg:
 
     def __init__(self, tmp):
         self.publish_dir = str(tmp / "published")
+        self.db_path = str(tmp / "w.db")          # the background sync opens its own connection
 
 
 @pytest.fixture
 def fresh_state(monkeypatch):
     for k, v in {"glow_next_epoch": 0.0, "last_glow_ok": 0, "glow_last_success_epoch": 0.0,
-                 "glow_latest": {}, "failures": 0}.items():
+                 "glow_latest": {}, "glow_missing": {}, "glow_thread": None, "glow_result": None,
+                 "failures": 0}.items():
         monkeypatch.setitem(main.STATE, k, v)
+    yield
+    main.wait_for_glow(10)
 
 
 def test_bright_outage_costs_no_hub_reading(tmp_path, fresh_state):
     store = Store(str(tmp_path / "w.db"))
-    main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, FakeBright(fail_login=True))
-    run = store.conn.execute("SELECT hub_ok, glow_ok, error FROM run_log").fetchone()
+    bright = FakeBright(fail_login=True)
+    main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
+    main.wait_for_glow(10)
+    main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 2, None, bright)  # records the result
+    run = store.conn.execute("SELECT hub_ok, glow_ok, error FROM run_log ORDER BY ts_utc DESC").fetchone()
     assert (run["hub_ok"], run["glow_ok"]) == (1, 0) and "HTTP 401" in run["error"]
-    assert store.conn.execute("SELECT COUNT(*) FROM room_reading").fetchone()[0] == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM room_reading").fetchone()[0] >= 1
     assert 3000 < main.STATE["glow_next_epoch"] - time.time() <= 3600
 
 
@@ -207,6 +214,7 @@ def test_sync_runs_then_waits_and_metrics_show_it(tmp_path, fresh_state, monkeyp
     store = Store(str(tmp_path / "w.db"))
     bright = FakeBright(history_from=NOW - timedelta(days=3))
     main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
+    main.wait_for_glow(10)
     assert main.STATE["last_glow_ok"] == 1
     n = len(bright.calls)
     main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 2, None, bright)
@@ -355,6 +363,7 @@ def test_missing_metric_is_published(tmp_path, fresh_state, monkeypatch):
     bright = FakeBright(history_from=NOW - timedelta(days=30),
                         holes=[(NOW - timedelta(days=20), NOW - timedelta(days=19))])
     main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
+    main.wait_for_glow(10)
     assert main.STATE["glow_missing"] == {"gas.consumption": 48, "electricity.consumption": 48}
 
 
@@ -425,7 +434,7 @@ def test_a_failing_chunk_is_skipped_not_fatal(tmp_path):
     assert first[:7] == "2025-10"                                    # history either side arrived
     lo = glow._grid_floor(bad)
     assert store.energy_count("gas.consumption", glow._iso(lo), glow._iso(lo + timedelta(days=10))) == 0
-    assert glow._iso(lo) not in store.energy_chunks("gas.consumption")   # not counted as a try
+    assert store.energy_chunks("gas.consumption")[glow._iso(lo)][0] == 1  # counts as a try
 
     bright.flaky = None                                              # service recovers
     glow.sync(store, bright, ["gas.consumption"], 395, NOW + timedelta(hours=6))
@@ -441,3 +450,52 @@ def test_history_stops_after_three_failures_in_a_row(tmp_path):
     history_calls = [c for c in bright.readings_calls() if c[2] < recent]
     assert len(history_calls) == glow.HISTORY_FAILURES_TO_STOP
     assert store.energy_range("gas.consumption")[1] is not None          # recent data still saved
+
+
+def test_chunks_that_always_fail_do_not_block_later_ones(tmp_path):
+    """Seen live: Feb 28, Mar 10 and Mar 20 2026 timed out every time, and
+    stopped the history before it reached March-October."""
+    store = Store(str(tmp_path / "w.db"))
+    bad = {glow._grid_floor(datetime(2026, m, d, tzinfo=timezone.utc)).date()
+           for m, d in ((2, 28), (3, 10), (3, 20))}
+    bright = FakeBright(history_from=datetime(2025, 10, 1, tzinfo=timezone.utc),
+                        flaky=lambda start: start.date() in bad)
+    t = NOW
+    for _ in range(3):
+        glow.sync(store, bright, ["gas.consumption"], 395, t)
+        t += timedelta(hours=6)
+    june = store.energy_count("gas.consumption", "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z")
+    assert june == 30 * 48                                              # got past the bad stretch
+
+
+def test_one_meter_failing_does_not_stop_the_other(tmp_path):
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=30))
+    real = bright.readings
+
+    def electricity_down(token, rid, start, end):
+        if rid == "id-electricity.consumption":
+            raise glow.GlowError("glow request failed: RemoteDisconnected")
+        return real(token, rid, start, end)
+    bright.readings = electricity_down
+    with pytest.raises(glow.GlowError, match="electricity"):
+        glow.sync(store, bright, CLASSIFIERS, 395, NOW)
+    assert count(store, "gas.consumption") > 0                          # gas still synced
+
+
+def test_hub_poll_never_waits_for_a_slow_sync(tmp_path, fresh_state):
+    store = Store(str(tmp_path / "w.db"))
+    bright = FakeBright(history_from=NOW - timedelta(days=3))
+    real = bright.login
+
+    def slow_login():
+        time.sleep(1.5)                                  # Bright taking its time
+        return real()
+    bright.login = slow_login
+    started = time.time()
+    main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 1, None, bright)
+    assert time.time() - started < 1.0                   # the hub cycle didn't wait
+    assert main.STATE["glow_thread"].is_alive()
+    main.cycle(Cfg(tmp_path), store, FakeHub(), None, None, 2, None, bright)   # no second sync started
+    main.wait_for_glow(10)
+    assert main.STATE["last_glow_ok"] == 1 and count(store) > 0

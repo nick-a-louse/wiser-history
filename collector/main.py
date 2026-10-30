@@ -39,7 +39,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger("wiser")
 
 # Release number; the image build adds its git commit (APP_VERSION, e.g. "sha-7eec055...").
-RELEASE = "1.3.3"
+RELEASE = "1.3.4"
 _build = os.environ.get("APP_VERSION", "").strip()
 VERSION = RELEASE if not _build or _build.lstrip("v") == RELEASE else "%s (%s)" % (RELEASE, _build[:11])
 
@@ -56,6 +56,8 @@ STATE = {
     "glow_next_epoch": 0.0,
     "glow_latest": {},                # {classifier: unix time of newest stored half-hour}
     "glow_missing": {},               # {classifier: half-hours missing inside the stored range}
+    "glow_thread": None,              # the background sync, while one is running
+    "glow_result": None,              # (ok, error) of a finished sync, for the next run_log row
     "cycles": 0,
     "failures": 0,
 }
@@ -190,7 +192,8 @@ def glow_due(cfg):
 
 
 def run_glow(cfg, store, client, now):
-    """Sync energy_halfhourly from Bright. Returns (ok, error). Never raises."""
+    """Sync energy_halfhourly from Bright. Returns (ok, error). Never raises.
+    Runs on its own thread (see start_glow), never in the hub loop."""
     try:
         glow_sync(store, client, cfg.glow_classifiers, cfg.glow_history_days, now)
         STATE["glow_last_success_epoch"] = time.time()
@@ -209,7 +212,44 @@ def run_glow(cfg, store, client, now):
         STATE["glow_missing"] = glow_missing(store, cfg.glow_classifiers, now)
     except Exception:
         log.exception("couldn't read the newest smart-meter readings")
+    STATE["last_glow_ok"] = int(ok)
     return ok, error
+
+
+def start_glow(cfg, client):
+    """Start a smart-meter sync on a background thread, with its own database
+    connection, unless one is already running. Bright can take minutes when it
+    is struggling (2026-10-29: 30-second timeouts, one after another); the
+    5-minute hub poll must never wait for it. SQLite in WAL mode lets the two
+    connections work side by side."""
+    running = STATE["glow_thread"]
+    if running is not None and running.is_alive():
+        return False
+
+    def work():
+        try:
+            store = Store(cfg.db_path)
+            try:
+                STATE["glow_result"] = run_glow(cfg, store, client, utcnow())
+            finally:
+                store.close()
+        except Exception as exc:          # e.g. the database couldn't be opened
+            log.exception("glow sync thread failed")
+            STATE["glow_result"] = (False, "glow: %s" % type(exc).__name__)
+            STATE["last_glow_ok"] = 0
+            STATE["glow_next_epoch"] = time.time() + GLOW_RETRY_SECONDS
+
+    thread = threading.Thread(target=work, name="glow-sync", daemon=True)
+    STATE["glow_thread"] = thread
+    thread.start()
+    return True
+
+
+def wait_for_glow(timeout=None):
+    """Block until a running background sync finishes (tests and shutdown)."""
+    thread = STATE["glow_thread"]
+    if thread is not None:
+        thread.join(timeout)
 
 
 def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None, glow=None):
@@ -254,12 +294,17 @@ def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None, glow=None)
         if om_error:
             error = "; ".join(filter(None, [error, om_error]))
 
-    # Smart-meter energy, every few hours. Doesn't need the hub (the meter
-    # data comes from Bright), so it runs even if the hub poll failed.
-    if glow is not None and glow_due(cfg):
-        glow_ok, glow_error = run_glow(cfg, store, glow, now)
-        if glow_error:
-            error = "; ".join(filter(None, [error, glow_error]))
+    # Smart-meter energy, every few hours, on its own thread. Doesn't need the
+    # hub (the meter data comes from Bright). A sync that finished since the
+    # last cycle is recorded in this cycle's run_log row.
+    if glow is not None:
+        result, STATE["glow_result"] = STATE["glow_result"], None
+        if result is not None:
+            glow_ok, glow_error = result
+            if glow_error:
+                error = "; ".join(filter(None, [error, glow_error]))
+        if glow_due(cfg):
+            start_glow(cfg, glow)
 
     if hub_ok:
         try:
@@ -288,8 +333,6 @@ def cycle(cfg, store, hub, weather, publisher, count, openmeteo=None, glow=None)
         STATE["last_publish_ok"] = int(publish_ok)
     if openmeteo_ok is not None:
         STATE["last_openmeteo_ok"] = int(openmeteo_ok)
-    if glow_ok is not None:
-        STATE["last_glow_ok"] = int(glow_ok)
     STATE["cycles"] += 1
     if error:
         STATE["failures"] += 1
@@ -338,6 +381,7 @@ def main():
         stopping.wait(delay)
 
     log.info("shutting down")
+    wait_for_glow(5)                      # let a running smart-meter sync finish its chunk
     store.close()
     return 0
 

@@ -46,8 +46,10 @@ REFRESH_DAYS = 3           # recent days re-read each sync: the DCC can deliver 
 RETRY_AFTER_SECONDS = 5
 # History reads are spaced out and isolated: on 2026-10-29 Bright's service was
 # struggling and a single dropped connection ended the whole sync. A chunk that
-# fails is skipped (and not counted as a try); three failures in a row end the
-# history part of this sync, because the service is clearly down.
+# fails is skipped and counts as a try, so it joins the capped re-read queue
+# instead of staying at the front: three chunks that always time out must not
+# block every chunk after them for ever (seen live with Feb-Mar 2026). Three
+# failures in a row end that meter's history for this sync.
 HISTORY_PAUSE_SECONDS = 1
 HISTORY_FAILURES_TO_STOP = 3
 GAP_CHUNKS_PER_SYNC = 6
@@ -182,44 +184,58 @@ def sync(store, client, classifiers, history_days, now):
         if c not in available:
             log.warning("glow account has no %s resource; skipping it", c)
 
-    written, reread, history = {}, {}, {}
+    written, reread, history, failures = {}, {}, {}, {}
     for classifier in wanted:
-        rid = available[classifier]
-        client.catchup(token, rid)
-        count = 0
-        before = _stored(store, classifier)
+        try:
+            _sync_one(store, client, token, classifier, available[classifier],
+                      window_start, now, fetched, written, reread, history)
+        except GlowError as exc:
+            # One meter failing (e.g. its refresh timing out) mustn't stop the other.
+            failures[classifier] = str(exc)
+            log.error("glow %s failed this sync: %s", classifier, exc)
 
-        def fetch(lo, hi):
-            units, rows = client.readings(token, rid, lo, hi)
-            return store.record_energy(classifier, rows, units, fetched)
-
-        first, last = store.energy_range(classifier)
-        if last is None:
-            count += fetch(max(now - timedelta(days=CHUNK_DAYS), window_start), now)
-        else:
-            lo = max(_parse(last) - timedelta(days=REFRESH_DAYS), window_start)
-            while lo < now:
-                hi = min(lo + timedelta(days=CHUNK_DAYS), now)
-                count += fetch(lo, hi)
-                lo = hi
-        store.commit()
-
-        if store.energy_range(classifier)[0] is not None:
-            n, read, failed, todo = _fill_history(store, classifier, fetch, window_start, now, fetched)
-            count += n
-            history[classifier] = (read, failed, todo)
-        new = _stored(store, classifier) - before
-        written[classifier] = new
-        reread[classifier] = count - new
-
-    # "new" is what this sync added; "re-read" is readings fetched again and
-    # rewritten unchanged (the 3-day refresh and the history re-reads).
-    log.info("glow ok: %s", ", ".join(
-        "%s +%d new (%d re-read)" % (c, n, reread[c]) for c, n in written.items()))
+    if written:
+        # "new" is what this sync added; "re-read" is readings fetched again and
+        # rewritten unchanged (the 3-day refresh and the history re-reads).
+        log.info("glow ok: %s", ", ".join(
+            "%s +%d new (%d re-read)" % (c, n, reread[c]) for c, n in written.items()))
     for c, (read, failed, todo) in history.items():
         if todo:
             log.info("glow %s history: %d of %d chunks read, %d failed", c, read, todo, failed)
+    if failures:
+        raise GlowError("; ".join("%s: %s" % (c, e) for c, e in failures.items()))
     return written
+
+
+def _sync_one(store, client, token, classifier, rid, window_start, now, fetched,
+              written, reread, history):
+    """Refresh and back-fill one meter. Raises GlowError if its refresh fails."""
+    client.catchup(token, rid)
+    count = 0
+    before = _stored(store, classifier)
+
+    def fetch(lo, hi):
+        units, rows = client.readings(token, rid, lo, hi)
+        return store.record_energy(classifier, rows, units, fetched)
+
+    first, last = store.energy_range(classifier)
+    if last is None:
+        count += fetch(max(now - timedelta(days=CHUNK_DAYS), window_start), now)
+    else:
+        lo = max(_parse(last) - timedelta(days=REFRESH_DAYS), window_start)
+        while lo < now:
+            hi = min(lo + timedelta(days=CHUNK_DAYS), now)
+            count += fetch(lo, hi)
+            lo = hi
+    store.commit()
+
+    if store.energy_range(classifier)[0] is not None:
+        n, read, failed, todo = _fill_history(store, classifier, fetch, window_start, now, fetched)
+        count += n
+        history[classifier] = (read, failed, todo)
+    new = _stored(store, classifier) - before
+    written[classifier] = new
+    reread[classifier] = count - new
 
 
 def _stored(store, classifier):
@@ -268,8 +284,10 @@ def _fill_history(store, classifier, fetch, window_start, now, fetched):
         except GlowError as exc:
             failed += 1
             in_a_row += 1
-            log.warning("glow %s: history chunk from %s failed (%s); will try again next sync",
+            log.warning("glow %s: history chunk from %s failed (%s); will try again later",
                         classifier, key[:10], exc)
+            store.record_energy_chunk(classifier, key, fetched)       # counts as a try
+            store.commit()
             if in_a_row >= HISTORY_FAILURES_TO_STOP:
                 log.warning("glow %s: %d failures in a row; leaving the rest of the history "
                             "until the next sync", classifier, in_a_row)
