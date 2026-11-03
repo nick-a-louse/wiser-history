@@ -483,7 +483,8 @@ def test_one_meter_failing_does_not_stop_the_other(tmp_path):
     assert count(store, "gas.consumption") > 0                          # gas still synced
 
 
-def test_hub_poll_never_waits_for_a_slow_sync(tmp_path, fresh_state):
+def test_hub_poll_never_waits_for_a_slow_sync(tmp_path, fresh_state, monkeypatch):
+    monkeypatch.setattr(main, "utcnow", lambda: NOW)    # meter data is relative to NOW
     store = Store(str(tmp_path / "w.db"))
     bright = FakeBright(history_from=NOW - timedelta(days=3))
     real = bright.login
