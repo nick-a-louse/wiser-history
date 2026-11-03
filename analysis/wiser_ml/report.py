@@ -116,8 +116,9 @@ def write_results_page(daily_all, hourly, out_dir, generated_label, source_label
         "- **%d complete heating-season days** (all 48 half-hours of gas), %s to %s. "
         "Days with any missing half-hour are left out, never guessed." % (
             len(used), _month_name(months[0]), _month_name(months[-1])),
+        # count only: the dates would show when the house was empty (public repo)
         "- **Days away are left out**: the model predicts a normal day at home. %s" % (
-            "Left out: " + ", ".join(d.strftime("%a %d %b %Y") for d in away.index) + "."
+            "%d day%s left out (dates not published)." % (len(away), "" if len(away) == 1 else "s")
             if len(away) else "None found."),
         "- **Hot water is measured, not guessed**: %s" % (
             "about **%.1f kWh/day** (typically %.1f to %.1f), from %d warm days with the heating off. "

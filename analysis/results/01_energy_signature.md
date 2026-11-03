@@ -7,7 +7,7 @@
 ## Data
 
 - **107 complete heating-season days** (all 48 half-hours of gas), Oct 2025 to Oct 2026. Days with any missing half-hour are left out, never guessed.
-- **Days away are left out**: the model predicts a normal day at home. Left out: Tue 06 Oct 2026.
+- **Days away are left out**: the model predicts a normal day at home. 1 day left out (dates not published).
 - **Hot water is measured, not guessed**: about **3.5 kWh/day** (typically 2.2 to 5.2), from 15 warm days with the heating off. The model's own estimate was poor, so it's fixed at this value.
 - Weather: Open-Meteo hourly temperature, wind and sunshine.
 
