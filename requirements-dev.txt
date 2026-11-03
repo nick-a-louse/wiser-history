@@ -1,2 +1,8 @@
 -r requirements.txt
 pytest>=8
+# analysis/ (TECH-98): tested in CI, never installed in the images
+pandas>=2.2
+numpy>=1.26
+statsmodels>=0.14
+matplotlib>=3.8
+nbformat>=5

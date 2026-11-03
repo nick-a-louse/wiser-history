@@ -6,3 +6,6 @@ data/
 *.swp
 *.swo
 *~
+# analysis outputs can contain real household data
+analysis/output/
+.ipynb_checkpoints/

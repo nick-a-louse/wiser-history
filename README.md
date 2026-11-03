@@ -220,6 +220,13 @@ the site draws them as breaks in the line, so an outage looks like an outage.
 Given this project's history of failures hiding in plain sight, the chart should
 make them more visible, not less.
 
+## Analysis
+
+The collected data feeds machine-learning notebooks in [`analysis/`](analysis/), run on a copy of the database, never in the containers. The first one models the whole house's daily gas use against the weather, as a yardstick for experiments such as new blinds.
+
+- Write-up: [Machine learning on my heating data, part 1](docs/heating-ml.md)
+- Detailed results and charts: [`analysis/results/01_energy_signature.md`](analysis/results/01_energy_signature.md)
+
 ## Development
 
 ```bash
@@ -242,6 +249,7 @@ Pushing to `main` runs the tests and publishes two images to ghcr.io:
 
 ```
 docs/screenshots/      the pictures in this README (light and dark, desktop and phone)
+docs/heating-ml.md     write-up of the machine-learning analysis
 collector/config.py    environment parsing, validated at startup
 collector/hub.py       Wiser hub client + response parsing
 collector/weather.py   OpenWeatherMap One Call 4.0 client (scrubs the API key)
@@ -262,6 +270,7 @@ web/Dockerfile         vendors ECharts at build time (no CDN at runtime), stamps
 
 docker-compose.yml     what runs on the server (/srv/wiser)
 scripts/               demo_data.py, make_icons.py
+analysis/              ML notebooks + wiser_ml package (TECH-98); runs on a copy of the DB, not in the images
 tests/                 pytest
 ```
 
